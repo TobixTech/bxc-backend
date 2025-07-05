@@ -14,14 +14,15 @@ primary_region = "ams" # Replace with your preferred region (e.g., ams, lhr, iad
   # but sensitive ones like MONGODB_URI should be set as secrets.
 
 [http_service]
-  internal_port = 5000 # Make sure this matches the PORT your app listens on (process.env.PORT)
+  internal_port = 5000
   force_https = true
-  auto_stop_machines = []
-  auto_start_machines = []
-  min_machines_running = 1 # Keep at least one machine running for responsiveness
+  auto_stop_machines = true  # Set to true to allow machines to stop when idle
+  auto_start_machines = true # Set to true to allow machines to start when needed
+  min_machines_running = 1
   processes = ["app"]
+
 
 [[vm]]
   cpu_kind = "shared"
   cpus = 1
-  memory = "256mb"
+  memory = "1024mb"
