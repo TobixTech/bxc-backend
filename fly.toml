@@ -16,10 +16,11 @@ primary_region = "ams" # Replace with your preferred region (e.g., ams, lhr, iad
 [http_service]
   internal_port = 5000
   force_https = true
-  auto_stop_machines = true  # Set to true to allow machines to stop when idle
-  auto_start_machines = true # Set to true to allow machines to start when needed
+  auto_stop_machines = true  # THIS LINE MUST BE TRUE
+  auto_start_machines = true # THIS LINE MUST BE TRUE
   min_machines_running = 1
   processes = ["app"]
+
 
 
 [[vm]]
