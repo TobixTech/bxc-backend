@@ -1,4 +1,4 @@
-app = "YOUR_ACTUAL_APP_NAME_FROM_FLYCTL_LAUNCH" # IMPORTANT: Use the app name you chose during flyctl launch!
+app = "bxc-backend" # IMPORTANT: Use the app name you chose during flyctl launch!
 primary_region = "ams" # Replace with your preferred region (e.g., ams, lhr, iad)
 
 # Remove the [build] section entirely if you are using a Dockerfile.
