@@ -1,4 +1,4 @@
-// backend/index.js (formerly api/index.js)
+// backend/index.js
 
 require('dotenv').config(); // Load environment variables from .env file for local development
 
@@ -15,14 +15,16 @@ app.use(express.json()); // Enable JSON body parsing for incoming requests
 
 // --- MongoDB Connection ---
 const uri = process.env.MONGODB_URI;
-const dbName = process.env.DB_NAME || 'ExtraShare';
+const dbName = process.env.DB_NAME || 'ExtraShare'; // Your database name
 
 let client; // Declare client globally
 
 async function connectToMongo() {
   if (!uri) {
     console.error("MONGODB_URI is not set. Please provide it in .env or as Fly.io secret.");
-    process.exit(1); // Exit if critical env var is missing
+    // In a production environment like Fly.io, process.exit(1) is common for critical failures.
+    // For local dev, you might just log and continue, but it won't work without the URI.
+    process.exit(1); 
   }
 
   try {
@@ -37,7 +39,7 @@ async function connectToMongo() {
     console.log("Connected to MongoDB!");
   } catch (err) {
     console.error("Failed to connect to MongoDB", err);
-    throw err;
+    throw err; // Propagate error to prevent server from starting if DB connection fails
   }
 }
 
@@ -67,7 +69,7 @@ const MAX_STAKE_SLOTS = 30000; // Maximum total staking slots available
 
 // Health Check Endpoint (IMPORTANT for Fly.io monitoring)
 app.get('/api/health', (req, res) => {
-    if (client && client.db) { // Simple check, more robust would be a ping
+    if (client && client.db) { // Simple check: is client object and its db method available?
         res.status(200).json({ status: 'ok', message: 'Backend is healthy and connected to DB.' });
     } else {
         res.status(500).json({ status: 'error', message: 'Backend is running but DB connection is not established.' });
@@ -103,7 +105,8 @@ app.post('/api/status', async (req, res) => {
                 lastReferralCopyBonusGiven: null, // When the last referral copy bonus was given
                 referralCode: walletAddress.toLowerCase().slice(-6), // Last 6 digits
                 referralCount: 0, // Number of users referred
-                createdAt: new Date()
+                createdAt: new Date(),
+                stakeTransactions: [] // NEW: To store transaction hashes for stakes
             };
             await usersCollection.insertOne(user);
         }
@@ -150,7 +153,8 @@ app.post('/api/status', async (req, res) => {
                 lastReferralCopyBonusGiven: user.lastReferralCopyBonusGiven,
                 referralCode: user.referralCode,
                 referralCount: user.referralCount,
-                createdAt: user.createdAt
+                createdAt: user.createdAt,
+                stakeTransactions: user.stakeTransactions // NEW
             },
             global: {
                 totalSlotsUsed: globalState.totalSlotsUsed,
@@ -171,10 +175,13 @@ app.post('/api/status', async (req, res) => {
 
 // 2. POST /api/stake - Handle the BNB staking transaction and BXC reward
 app.post('/api/stake', async (req, res) => {
-    const { walletAddress, referrerRef } = req.body;
+    const { walletAddress, referrerRef, transactionHash } = req.body; // <-- transactionHash added
 
     if (!walletAddress) {
         return res.status(400).json({ message: "Wallet address is required." });
+    }
+    if (!transactionHash) { // Ensure transaction hash is sent for real stakes
+        return res.status(400).json({ message: "Transaction hash is required for staking." });
     }
 
     const userWalletAddress = walletAddress.toLowerCase();
@@ -185,11 +192,16 @@ app.post('/api/stake', async (req, res) => {
         const globalStateCollection = db.collection('globalState');
 
         let user = await usersCollection.findOne({ walletAddress: userWalletAddress });
-        let globalState = await globalStateCollection.findOne({}); // Fetch global state to check limit
+        let globalState = await globalStateCollection.findOne({});
 
         // --- Check if max slots reached ---
         if (globalState.totalSlotsUsed >= MAX_STAKE_SLOTS) {
             return res.status(400).json({ message: "All staking slots are currently filled. Please check back later." });
+        }
+
+        // Check if transaction hash already recorded to prevent duplicate stakes
+        if (user && user.stakeTransactions && user.stakeTransactions.some(tx => tx.hash === transactionHash)) {
+            return res.status(400).json({ message: "This transaction has already been recorded." });
         }
 
         if (user && user.slotsStaked > 0) {
@@ -208,29 +220,22 @@ app.post('/api/stake', async (req, res) => {
                 lastReferralCopyBonusGiven: null,
                 referralCode: userWalletAddress.slice(-6),
                 referralCount: 0,
-                createdAt: new Date()
+                createdAt: new Date(),
+                stakeTransactions: [] // NEW
             };
             await usersCollection.insertOne(user);
         }
 
         // --- Process the stake ---
-        // Increment stake count, add initial BXC, and set initial staked USD value
-        const updateResult = await usersCollection.updateOne(
+        // $inc increments, $set sets a value, $push adds to an array
+        await usersCollection.updateOne(
             { walletAddress: userWalletAddress },
             {
                 $inc: { slotsStaked: 1, BXC_Balance: INITIAL_BXC },
-                $set: { stakedUSDValue: INITIAL_STAKE_AMOUNT } // Set initial $8 stake
+                $set: { stakedUSDValue: INITIAL_STAKE_AMOUNT }, // Set initial $8 stake
+                $push: { stakeTransactions: { hash: transactionHash, timestamp: new Date() } } // Store hash
             }
         );
-
-        if (updateResult.modifiedCount === 0 && updateResult.upsertedCount === 0) {
-             console.warn(`Stake update failed for ${userWalletAddress}, attempting re-fetch.`);
-            const confirmedUser = await usersCollection.findOne({ walletAddress: userWalletAddress });
-            if (confirmedUser && confirmedUser.slotsStaked > 0) {
-                 return res.status(400).json({ message: "Stake already recorded or processed. No duplicate." });
-            }
-            return res.status(500).json({ message: "Failed to record stake. Please try again." });
-        }
 
         // --- Update Global State ---
         await globalStateCollection.updateOne(
@@ -251,22 +256,25 @@ app.post('/api/stake', async (req, res) => {
             }
         }
 
+        // Re-fetch updated user and global state for response
         const updatedUser = await usersCollection.findOne({ walletAddress: userWalletAddress });
         const updatedGlobalState = await globalStateCollection.findOne({});
 
         res.status(200).json({
             message: "Stake successful! Welcome to ExtraShare BXC!",
+            transactionHash: transactionHash, // Include hash in response
             user: {
                 walletAddress: updatedUser.walletAddress,
                 slotsStaked: updatedUser.slotsStaked,
-                stakedUSDValue: updatedUser.stakedUSDValue, // NEW
+                stakedUSDValue: updatedUser.stakedUSDValue,
                 BXC_Balance: updatedUser.BXC_Balance,
                 claimedEventRewardTime: updatedUser.claimedEventRewardTime,
                 collectedEventRewardTime: updatedUser.collectedEventRewardTime,
-                lastRevealedUSDAmount: updatedUser.lastRevealedUSDAmount, // NEW
+                lastRevealedUSDAmount: updatedUser.lastRevealedUSDAmount,
                 lastReferralCopyBonusGiven: updatedUser.lastReferralCopyBonusGiven,
                 referralCode: updatedUser.referralCode,
-                referralCount: updatedUser.referralCount
+                referralCount: updatedUser.referralCount,
+                stakeTransactions: updatedUser.stakeTransactions
             },
             global: {
                 totalSlotsUsed: updatedGlobalState.totalSlotsUsed,
