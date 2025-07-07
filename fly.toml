@@ -20,4 +20,4 @@ primary_region = "ams" # Replace with your preferred region (e.g., ams, lhr, iad
 [[vm]]
   cpu_kind = "shared"
   cpus = 1
-  memory = "512mb"
+  memory = "256mb"
