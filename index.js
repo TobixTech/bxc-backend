@@ -6,15 +6,15 @@ const express = require('express');
 const { MongoClient, ServerApiVersion } = require('mongodb');
 const cors = require('cors');
 
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST"],
-  allowedHeaders: ["Content-Type"]
-}));
+const app = express();
 const port = process.env.PORT || 5000; // Use port from environment (Fly.io will set this) or default to 5000
 
 // --- Middleware ---
-app.use(cors()); // Enable CORS for all routes, allowing frontend access
+app.use(cors({
+  origin: "*",  // Or restrict to Vercel domain if needed
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type"]
+})); // Enable CORS for all routes, allowing frontend access
 app.use(express.json()); // Enable JSON body parsing for incoming requests
 
 // --- MongoDB Connection ---
