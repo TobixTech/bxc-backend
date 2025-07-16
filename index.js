@@ -6,7 +6,11 @@ const express = require('express');
 const { MongoClient, ServerApiVersion } = require('mongodb');
 const cors = require('cors');
 
-const app = express();
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type"]
+}));
 const port = process.env.PORT || 5000; // Use port from environment (Fly.io will set this) or default to 5000
 
 // --- Middleware ---
