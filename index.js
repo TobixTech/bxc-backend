@@ -476,4 +476,38 @@ app.post('/api/referral-copied', async (req, res) => {
         await usersCollection.updateOne(
             { walletAddress: walletAddress.toLowerCase() },
             {
-                
+                $inc: { BXC_Balance: REFERRAL_COPY_BXC_BONUS },
+                $set: { lastReferralCopyBonusGiven: now }
+            }
+        );
+
+        const updatedUser = await usersCollection.findOne({ walletAddress: walletAddress.toLowerCase() });
+
+        res.status(200).json({
+            message: `You received ${REFERRAL_COPY_BXC_BONUS} BXC for copying the referral link!`,
+            awardedAmount: REFERRAL_COPY_BXC_BONUS,
+            user: {
+                BXC_Balance: updatedUser.BXC_Balance
+            }
+        });
+
+    } catch (error) {
+        console.error("Error awarding referral copy bonus:", error);
+        res.status(500).json({ message: "Internal server error." });
+    }
+});
+
+// ===========================================
+// Server Startup (WITH CORS FIXES APPLIED)
+// ===========================================
+connectToMongo()
+  .then(() => {
+    app.listen(port, () => {
+      console.log(`🚀 Backend running on port ${port}`);
+      console.log(`🔒 CORS restricted to: https://xtrashare-bxc.vercel.app`);
+    });
+  })
+  .catch(err => {
+    console.error("💥 Failed to start:", err);
+    process.exit(1);
+  });
