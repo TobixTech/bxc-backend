@@ -6,9 +6,9 @@ const cors = require('cors');
 const app = express();
 const port = process.env.PORT || 5000;
 
-// ===========================================
-// ONLY CORS FIXES ADDED (NO REMOVED CODE)
-// ===========================================
+// ======================
+// CORS Configuration (ONLY ADDITION)
+// ======================
 const corsOptions = {
   origin: "https://xtrashare-bxc.vercel.app",
   methods: ["GET", "POST", "OPTIONS"],
@@ -17,7 +17,7 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions)); // Preflight handling
-// ===========================================
+// ======================
 
 app.use(express.json());
 
@@ -71,7 +71,7 @@ const MAX_STAKE_SLOTS = 30000;
 
 // --- API Routes ---
 
-// Health Check
+// Health Check Endpoint
 app.get('/api/health', (req, res) => {
     if (client && client.db) {
         res.status(200).json({ status: 'ok', message: 'Backend is healthy and connected to DB.' });
