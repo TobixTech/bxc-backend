@@ -1,6 +1,6 @@
 // backend/index.js
 
-require('dotenv').config();
+require('dotenv').config(); // Load environment variables from .env file for local development
 
 const express = require('express');
 const { MongoClient, ServerApiVersion } = require('mongodb');
@@ -9,13 +9,15 @@ const cors = require('cors');
 const app = express();
 const port = process.env.PORT || 5000;
 
+// --- Middleware ---
 app.use(cors({
-  origin: "https://xtrashare-bxc.vercel.app", 
+  origin: "https://xtrashare-bxc.vercel.app", // IMPORTANT: Specify your frontend domain for production
   methods: ["GET", "POST"],
   allowedHeaders: ["Content-Type"]
 }));
-app.use(express.json());
+app.use(express.json()); // Enable JSON body parsing for incoming requests
 
+// --- MongoDB Connection ---
 const uri = process.env.MONGODB_URI;
 const dbName = process.env.DB_NAME || 'ExtraShare';
 
@@ -23,7 +25,8 @@ let client;
 
 async function connectToMongo() {
   if (!uri) {
-    console.error("MONGODB_URI is not set. Please provide it in .env or as Fly.io secret.");
+    console.error("CRITICAL ERROR: MONGODB_URI is not set. Please provide it as a Fly.io secret or in your local .env file.");
+    // Exit process if DB URI is not set, as DB connection is fundamental
     process.exit(1); 
   }
 
@@ -37,15 +40,20 @@ async function connectToMongo() {
     });
     await client.connect();
     console.log("Connected to MongoDB!");
+    // Ensure global state (event times) are initialized immediately after DB connection
     await ensureGlobalStateInitialized(); 
   } catch (err) {
-    console.error("Failed to connect to MongoDB", err);
-    throw err;
+    console.error("FAILED TO CONNECT TO MONGODB:", err);
+    // Exit process if DB connection fails, as this is a critical startup dependency
+    process.exit(1); 
   }
 }
 
+// Helper to get DB instance, ensuring connection is established/reused
 function getDb() {
     if (!client || !client.db) {
+        // This indicates a severe issue where DB client is not initialized
+        console.error("CRITICAL ERROR: MongoDB client not connected when getDb() was called.");
         throw new Error("MongoDB client not connected.");
     }
     return client.db(dbName);
@@ -71,49 +79,67 @@ const EVENT_DURATION_HOURS = 95;
 const MAX_STAKE_SLOTS = 30000;
 const LUCKY_WINNER_SLOT_THRESHOLD = 9000;
 
+// Admin Wallet Address - Must be set as a secret on Fly.io
+// Example: flyctl secrets set ADMIN_WALLET_ADDRESS="0xYOURADMINWALLETADDRESSHERE"
+const ADMIN_WALLET_ADDRESS = process.env.ADMIN_WALLET_ADDRESS ? process.env.ADMIN_WALLET_ADDRESS.toLowerCase() : ''; 
+if (!ADMIN_WALLET_ADDRESS) {
+    console.warn("WARNING: ADMIN_WALLET_ADDRESS environment variable is not set. Admin features will be inaccessible.");
+}
+
+// Helper function to check if the requesting wallet is an admin
+function isAdmin(walletAddress) {
+    return walletAddress && walletAddress.toLowerCase() === ADMIN_WALLET_ADDRESS;
+}
 
 // Ensures global event state is always present and valid
 async function ensureGlobalStateInitialized() {
-    const db = getDb();
-    const globalStateCollection = db.collection('globalState');
-    let globalState = await globalStateCollection.findOne({});
-    const now = new Date(); // Declare 'now' once for this function
+    try {
+        const db = getDb();
+        const globalStateCollection = db.collection('globalState');
+        let globalState = await globalStateCollection.findOne({});
+        const now = new Date();
 
-    if (!globalState || !globalState.eventStartTime || !globalState.eventEndTime || now > globalState.eventEndTime) {
-        console.log("Global event state not found or expired. Initializing a new event cycle from server start.");
-        const newEventStartTime = now;
-        const newEventEndTime = new Date(now.getTime() + EVENT_DURATION_HOURS * 60 * 60 * 1000);
-        
-        await globalStateCollection.updateOne(
-            {},
-            { $set: {
-                totalSlotsUsed: 0,
-                eventStartTime: newEventStartTime,
-                eventEndTime: newEventEndTime,
-                lastResetTime: now
-            }},
-            { upsert: true }
-        );
-        console.log(`New default global event started at: ${newEventStartTime}, ends at: ${newEventEndTime}`);
+        if (!globalState || !globalState.eventStartTime || !globalState.eventEndTime || now > globalState.eventEndTime) {
+            console.log("Global event state not found or expired. Initializing a new event cycle from server start.");
+            const newEventStartTime = now;
+            const newEventEndTime = new Date(now.getTime() + EVENT_DURATION_HOURS * 60 * 60 * 1000);
+            
+            await globalStateCollection.updateOne(
+                {},
+                { $set: {
+                    totalSlotsUsed: 0, 
+                    eventStartTime: newEventStartTime,
+                    eventEndTime: newEventEndTime,
+                    lastResetTime: now
+                }},
+                { upsert: true }
+            );
+            console.log(`New default global event started at: ${newEventStartTime}, ends at: ${newEventEndTime}`);
+        }
+    } catch (error) {
+        console.error("ERROR IN ensureGlobalStateInitialized:", error);
+        // This error might not be critical enough to stop the server from listening,
+        // but it means global state isn't initialized which will affect other endpoints.
+        // The server will still try to start.
     }
 }
 
 
-// Helper Function: Calculates and updates BXC balance based on time elapsed
+// --- Helper Functions for Backend Logic ---
+
 async function calculateAndSaveBXC(user) {
     const db = getDb();
     const usersCollection = db.collection('users');
     const globalStateCollection = db.collection('globalState');
     const globalState = await globalStateCollection.findOne({});
-    const now = new Date(); // Declare 'now' once for this function
+    const now = new Date();
 
-    // If no last accrual time or hasn't staked, just ensure time is set to now.
     if (!user.lastBXCAccrualTime || user.slotsStaked === 0) { 
         await usersCollection.updateOne(
             { walletAddress: user.walletAddress },
-            { $set: { lastBXCAccrualTime: now } } // Use 'now'
+            { $set: { lastBXCAccrualTime: now } }
         );
-        user.lastBXCAccrualTime = now; // Update local user object for current request
+        user.lastBXCAccrualTime = now; 
         return user; 
     }
 
@@ -133,7 +159,7 @@ async function calculateAndSaveBXC(user) {
 
     if (accruedBXC > 0 && user.slotsStaked > 0 && globalState && now >= globalState.eventStartTime && (eventEndTime ? now <= eventEndTime : true)) {
         user.BXC_Balance = (user.BXC_Balance || 0) + accruedBXC;
-        user.lastBXCAccrualTime = now; // Update last accrual time to now
+        user.lastBXCAccrualTime = now;
 
         await usersCollection.updateOne(
             { walletAddress: user.walletAddress },
@@ -155,10 +181,15 @@ async function calculateAndSaveBXC(user) {
 // --- API Routes ---
 
 app.get('/api/health', (req, res) => {
-    if (client && client.db) {
-        res.status(200).json({ status: 'ok', message: 'Backend is healthy and connected to DB.' });
-    } else {
-        res.status(500).json({ status: 'error', message: 'Backend is running but DB connection is not established.' });
+    try {
+        if (client && client.db) {
+            res.status(200).json({ status: 'ok', message: 'Backend is healthy and connected to DB.' });
+        } else {
+            res.status(500).json({ status: 'error', message: 'Backend is running but DB connection is not established.' });
+        }
+    } catch (error) {
+        console.error("Error in /api/health:", error);
+        res.status(500).json({ status: 'error', message: 'Internal server error during health check.' });
     }
 });
 
@@ -190,7 +221,7 @@ app.post('/api/status', async (req, res) => {
                     referralCount: 0,
                     createdAt: now,
                     stakeTransactions: [],
-                    lastBXCAccrualTime: now // Use 'now'
+                    lastBXCAccrualTime: now
                 };
                 await usersCollection.insertOne(user);
             } else {
@@ -199,6 +230,9 @@ app.post('/api/status', async (req, res) => {
         }
 
         const globalState = await globalStateCollection.findOne({}); 
+        if (!globalState) { // Should ideally be initialized by ensureGlobalStateInitialized, but fallback
+            throw new Error("Global state not found after startup initialization attempt.");
+        }
 
         res.json({
             user: user ? {
@@ -221,7 +255,7 @@ app.post('/api/status', async (req, res) => {
                 totalSlotsUsed: globalState.totalSlotsUsed,
                 eventStartTime: globalState.eventStartTime,
                 eventEndTime: globalState.eventEndTime,
-                serverTime: now, // Use 'now'
+                serverTime: now,
                 MAX_STAKE_SLOTS: MAX_STAKE_SLOTS
             },
             message: "Status fetched successfully."
@@ -252,6 +286,11 @@ app.post('/api/stake', async (req, res) => {
         let user = await usersCollection.findOne({ walletAddress: userWalletAddress });
         let globalState = await globalStateCollection.findOne({});
 
+        if (!globalState) { // Should not happen if ensureGlobalStateInitialized ran
+            throw new Error("Global state not found during stake. Server startup issue.");
+        }
+
+        // --- Event Cycle Reset Logic (if current event ended or slots filled) ---
         if (globalState.totalSlotsUsed >= MAX_STAKE_SLOTS || now > globalState.eventEndTime) {
             console.log("Current event cycle has ended or filled. Starting a new event cycle upon this stake.");
             const newEventStartTime = now;
@@ -260,7 +299,7 @@ app.post('/api/stake', async (req, res) => {
             await globalStateCollection.updateOne(
                 {},
                 { $set: {
-                    totalSlotsUsed: 0,
+                    totalSlotsUsed: 0, 
                     eventStartTime: newEventStartTime,
                     eventEndTime: newEventEndTime,
                     lastResetTime: now
@@ -269,7 +308,7 @@ app.post('/api/stake', async (req, res) => {
             globalState = await globalStateCollection.findOne({});
             
             await usersCollection.updateMany(
-                {},
+                {}, 
                 { $set: { 
                     claimedEventRewardTime: null, 
                     collectedEventRewardTime: null, 
@@ -746,6 +785,22 @@ app.post('/api/referral-copied', async (req, res) => {
     }
 });
 
+// --- NEW ADMIN API ROUTES ---
+// POST /api/admin/status - Check if connected user is an admin
+app.post('/api/admin/status', async (req, res) => {
+    const { walletAddress } = req.body;
+
+    if (!walletAddress) {
+        return res.status(400).json({ message: "Wallet address is required." });
+    }
+
+    if (isAdmin(walletAddress)) {
+        res.status(200).json({ isAdmin: true, message: "Welcome, Admin!" });
+    } else {
+        res.status(403).json({ isAdmin: false, message: "Access Denied: Not an admin." });
+    }
+});
+
 
 // --- Server Listener for Fly.io ---
 connectToMongo().then(() => {
@@ -753,6 +808,20 @@ connectToMongo().then(() => {
         console.log(`Backend server running on port ${port}`);
     });
 }).catch(err => {
-    console.error("Failed to start server due to MongoDB connection error:", err);
-    process.exit(1);
+    // This catch is for errors *before* app.listen or critical DB connection failures
+    console.error("FATAL: Failed to start server due to MongoDB connection or initialization error:", err);
+    process.exit(1); // Exit process on critical startup failure
+});
+
+// --- Robust Error Handling for Uncaught Exceptions ---
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('UNHANDLED REJECTION:', reason);
+    // Optionally, perform graceful shutdown or send error alerts
+    // process.exit(1); // In a production app, you might want to exit after logging
+});
+
+process.on('uncaughtException', (err) => {
+    console.error('UNCAUGHT EXCEPTION:', err);
+    // Optionally, perform graceful shutdown or send error alerts
+    // process.exit(1); // In a production app, you might want to exit after logging
 });
