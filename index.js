@@ -37,7 +37,6 @@ async function connectToMongo() {
     });
     await client.connect();
     console.log("Connected to MongoDB!");
-    // NEW: Ensure global state (event times) are initialized immediately after DB connection
     await ensureGlobalStateInitialized(); 
   } catch (err) {
     console.error("Failed to connect to MongoDB", err);
@@ -73,14 +72,13 @@ const MAX_STAKE_SLOTS = 30000;
 const LUCKY_WINNER_SLOT_THRESHOLD = 9000;
 
 
-// NEW FUNCTION: Ensures global event state is always present and valid
+// Ensures global event state is always present and valid
 async function ensureGlobalStateInitialized() {
     const db = getDb();
     const globalStateCollection = db.collection('globalState');
     let globalState = await globalStateCollection.findOne({});
-    const now = new Date();
+    const now = new Date(); // Declare 'now' once for this function
 
-    // Check if global state needs to be initialized or reset
     if (!globalState || !globalState.eventStartTime || !globalState.eventEndTime || now > globalState.eventEndTime) {
         console.log("Global event state not found or expired. Initializing a new event cycle from server start.");
         const newEventStartTime = now;
@@ -89,7 +87,7 @@ async function ensureGlobalStateInitialized() {
         await globalStateCollection.updateOne(
             {},
             { $set: {
-                totalSlotsUsed: 0, // Reset slots for new event cycle
+                totalSlotsUsed: 0,
                 eventStartTime: newEventStartTime,
                 eventEndTime: newEventEndTime,
                 lastResetTime: now
@@ -97,41 +95,28 @@ async function ensureGlobalStateInitialized() {
             { upsert: true }
         );
         console.log(`New default global event started at: ${newEventStartTime}, ends at: ${newEventEndTime}`);
-
-        // Optionally, reset user-specific reward states for the new cycle if desired here.
-        // This ensures old rewards are not collectable in new cycles.
-        // const usersCollection = db.collection('users');
-        // await usersCollection.updateMany(
-        //     {}, // All users or filter specific ones
-        //     { $set: { 
-        //         claimedEventRewardTime: null, 
-        //         collectedEventRewardTime: null, 
-        //         lastRevealedUSDAmount: 0,
-        //         lastReferralCopyBonusGiven: null // If you track this per event
-        //     } }
-        // );
     }
 }
 
 
-// --- Helper Functions for Backend Logic ---
-
+// Helper Function: Calculates and updates BXC balance based on time elapsed
 async function calculateAndSaveBXC(user) {
     const db = getDb();
     const usersCollection = db.collection('users');
     const globalStateCollection = db.collection('globalState');
     const globalState = await globalStateCollection.findOne({});
+    const now = new Date(); // Declare 'now' once for this function
 
-    if (!user.lastBXCAccrualTime || user.slotsStaked === 0) {
+    // If no last accrual time or hasn't staked, just ensure time is set to now.
+    if (!user.lastBXCAccrualTime || user.slotsStaked === 0) { 
         await usersCollection.updateOne(
             { walletAddress: user.walletAddress },
-            { $set: { lastBXCAccrualTime: new Date() } }
+            { $set: { lastBXCAccrualTime: now } } // Use 'now'
         );
-        user.lastBXCAccrualTime = new Date();
+        user.lastBXCAccrualTime = now; // Update local user object for current request
         return user; 
     }
 
-    const now = new Date();
     const eventEndTime = globalState ? globalState.eventEndTime : null;
 
     let accrualUntilTime = now;
@@ -148,7 +133,7 @@ async function calculateAndSaveBXC(user) {
 
     if (accruedBXC > 0 && user.slotsStaked > 0 && globalState && now >= globalState.eventStartTime && (eventEndTime ? now <= eventEndTime : true)) {
         user.BXC_Balance = (user.BXC_Balance || 0) + accruedBXC;
-        user.lastBXCAccrualTime = now;
+        user.lastBXCAccrualTime = now; // Update last accrual time to now
 
         await usersCollection.updateOne(
             { walletAddress: user.walletAddress },
@@ -180,6 +165,7 @@ app.get('/api/health', (req, res) => {
 
 app.post('/api/status', async (req, res) => {
     const { walletAddress } = req.body;
+    const now = new Date(); // Declare 'now' once for this function
 
     try {
         const db = getDb();
@@ -202,9 +188,9 @@ app.post('/api/status', async (req, res) => {
                     lastReferralCopyBonusGiven: null,
                     referralCode: walletAddress.toLowerCase().slice(-6),
                     referralCount: 0,
-                    createdAt: new Date(),
+                    createdAt: now,
                     stakeTransactions: [],
-                    lastBXCAccrualTime: new Date()
+                    lastBXCAccrualTime: now // Use 'now'
                 };
                 await usersCollection.insertOne(user);
             } else {
@@ -212,7 +198,6 @@ app.post('/api/status', async (req, res) => {
             }
         }
 
-        // Global state is guaranteed to exist and be valid due to ensureGlobalStateInitialized on startup
         const globalState = await globalStateCollection.findOne({}); 
 
         res.json({
@@ -236,7 +221,7 @@ app.post('/api/status', async (req, res) => {
                 totalSlotsUsed: globalState.totalSlotsUsed,
                 eventStartTime: globalState.eventStartTime,
                 eventEndTime: globalState.eventEndTime,
-                serverTime: new Date(),
+                serverTime: now, // Use 'now'
                 MAX_STAKE_SLOTS: MAX_STAKE_SLOTS
             },
             message: "Status fetched successfully."
@@ -251,6 +236,7 @@ app.post('/api/status', async (req, res) => {
 
 app.post('/api/stake', async (req, res) => {
     const { walletAddress, referrerRef, transactionHash } = req.body;
+    const now = new Date(); // Declare 'now' once for this function
 
     if (!walletAddress || !transactionHash) {
         return res.status(400).json({ message: "Wallet address and transaction hash are required for staking." });
@@ -264,12 +250,8 @@ app.post('/api/stake', async (req, res) => {
         const globalStateCollection = db.collection('globalState');
 
         let user = await usersCollection.findOne({ walletAddress: userWalletAddress });
-        let globalState = await globalStateCollection.findOne({}); // Global state is already initialized by startup
+        let globalState = await globalStateCollection.findOne({});
 
-        // --- Event Cycle Reset Logic (if current event ended or slots filled) ---
-        // This specific block now handles resetting the event cycle AFTER an event has finished naturally
-        // or if all slots are taken. It's different from the initial startup ensure.
-        const now = new Date();
         if (globalState.totalSlotsUsed >= MAX_STAKE_SLOTS || now > globalState.eventEndTime) {
             console.log("Current event cycle has ended or filled. Starting a new event cycle upon this stake.");
             const newEventStartTime = now;
@@ -278,28 +260,25 @@ app.post('/api/stake', async (req, res) => {
             await globalStateCollection.updateOne(
                 {},
                 { $set: {
-                    totalSlotsUsed: 0, // Reset slots for new event cycle
+                    totalSlotsUsed: 0,
                     eventStartTime: newEventStartTime,
                     eventEndTime: newEventEndTime,
                     lastResetTime: now
                 }}
             );
-            globalState = await globalStateCollection.findOne({}); // Fetch updated globalState
+            globalState = await globalStateCollection.findOne({});
             
-            // Reset relevant user reward fields for the new event cycle for all users
             await usersCollection.updateMany(
-                {}, // Update all users (or define criteria)
+                {},
                 { $set: { 
                     claimedEventRewardTime: null, 
                     collectedEventRewardTime: null, 
                     lastRevealedUSDAmount: 0,
-                    // lastReferralCopyBonusGiven: null // Uncomment if you want this bonus per event cycle, not just once
                 } }
             );
             console.log(`New event cycle started due to stake. Ends at: ${globalState.eventEndTime}`);
         }
 
-        // --- Check if user has already staked for this specific event cycle ---
         const hasStakedInCurrentCycle = user && user.stakeTransactions && 
             user.stakeTransactions.some(tx => tx.timestamp && tx.timestamp >= globalState.eventStartTime);
 
@@ -307,7 +286,6 @@ app.post('/api/stake', async (req, res) => {
             return res.status(400).json({ message: "You have already completed the one-time stake for this event cycle." });
         }
         
-        // Check if this exact transaction hash has already been recorded
         if (user && user.stakeTransactions && user.stakeTransactions.some(tx => tx.hash === transactionHash)) {
             return res.status(400).json({ message: "This transaction hash has already been recorded for your account." });
         }
@@ -325,16 +303,15 @@ app.post('/api/stake', async (req, res) => {
                 lastReferralCopyBonusGiven: null,
                 referralCode: userWalletAddress.slice(-6),
                 referralCount: 0,
-                createdAt: new Date(),
+                createdAt: now,
                 stakeTransactions: [],
-                lastBXCAccrualTime: new Date()
+                lastBXCAccrualTime: now
             };
             await usersCollection.insertOne(user);
         } else {
              user = await calculateAndSaveBXC(user); 
         }
 
-        const now = new Date();
         await usersCollection.updateOne(
             { walletAddress: userWalletAddress },
             {
@@ -404,6 +381,7 @@ app.post('/api/stake', async (req, res) => {
 
 app.post('/api/withdraw-stake', async (req, res) => {
     const { walletAddress } = req.body;
+    const now = new Date(); // Declare 'now' once for this function
 
     if (!walletAddress) {
         return res.status(400).json({ message: "Wallet address is required." });
@@ -424,7 +402,7 @@ app.post('/api/withdraw-stake', async (req, res) => {
             return res.status(400).json({ message: "You have no active stake to withdraw." });
         }
 
-        if (globalState && globalState.eventStartTime && new Date() > globalState.eventStartTime) {
+        if (globalState && globalState.eventStartTime && now > globalState.eventStartTime) {
              return res.status(400).json({ message: "Stake withdrawal is not allowed once the event has started." });
         }
 
@@ -436,7 +414,7 @@ app.post('/api/withdraw-stake', async (req, res) => {
                     stakedUSDValue: 0,
                     stakeTransactions: [],
                     BXC_Balance: 0, 
-                    lastBXCAccrualTime: new Date(),
+                    lastBXCAccrualTime: now,
                     claimedEventRewardTime: null,
                     collectedEventRewardTime: null,
                     lastRevealedUSDAmount: 0,
@@ -461,6 +439,7 @@ app.post('/api/withdraw-stake', async (req, res) => {
 
 app.post('/api/reveal-reward', async (req, res) => {
     const { walletAddress } = req.body;
+    const now = new Date(); // Declare 'now' once for this function
 
     if (!walletAddress) {
         return res.status(400).json({ message: "Wallet address is required." });
@@ -480,7 +459,6 @@ app.post('/api/reveal-reward', async (req, res) => {
             return res.status(400).json({ message: "You must stake first to reveal rewards." });
         }
 
-        const now = new Date();
         if (!globalState || !globalState.eventEndTime || now < globalState.eventEndTime) {
             return res.status(400).json({ message: "Reward reveal is only available after the event ends." });
         }
@@ -557,6 +535,7 @@ app.post('/api/reveal-reward', async (req, res) => {
 
 app.post('/api/collect-reward', async (req, res) => {
     const { walletAddress } = req.body;
+    const now = new Date(); // Declare 'now' once for this function
 
     if (!walletAddress) {
         return res.status(400).json({ message: "Wallet address is required." });
@@ -576,7 +555,6 @@ app.post('/api/collect-reward', async (req, res) => {
             return res.status(400).json({ message: "You must stake first to collect rewards." });
         }
 
-        const now = new Date();
         if (!globalState || !globalState.eventEndTime || now < globalState.eventEndTime) {
             return res.status(400).json({ message: "Reward collection is only available after the event ends." });
         }
@@ -627,6 +605,7 @@ app.post('/api/collect-reward', async (req, res) => {
 
 app.post('/api/withdraw', async (req, res) => {
     const { walletAddress, token, amount } = req.body;
+    const now = new Date(); // Declare 'now' once for this function
 
     if (!walletAddress || token !== 'BXC') {
         return res.status(400).json({ message: "Wallet address and token type (BXC) are required." });
@@ -671,6 +650,7 @@ app.post('/api/withdraw', async (req, res) => {
 
 app.post('/api/withdrawAIN', async (req, res) => {
     const { walletAddress, amount } = req.body;
+    const now = new Date(); // Declare 'now' once for this function
 
     if (!walletAddress) {
         return res.status(400).json({ message: "Wallet address is required." });
@@ -714,6 +694,7 @@ app.post('/api/withdrawAIN', async (req, res) => {
 
 app.post('/api/referral-copied', async (req, res) => {
     const { walletAddress } = req.body;
+    const now = new Date(); // Declare 'now' once for this function
 
     if (!walletAddress) {
         return res.status(400).json({ message: "Wallet address is required." });
@@ -745,7 +726,7 @@ app.post('/api/referral-copied', async (req, res) => {
             { walletAddress: userWalletAddress },
             {
                 $inc: { BXC_Balance: REFERRAL_COPY_BXC_BONUS },
-                $set: { lastReferralCopyBonusGiven: new Date() }
+                $set: { lastReferralCopyBonusGiven: now }
             }
         );
 
