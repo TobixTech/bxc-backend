@@ -1,6 +1,6 @@
 // backend/index.js
 
-require('dotenv').config(); // Load environment variables from .env file for local development
+require('dotenv').config();
 
 const express = require('express');
 const { MongoClient, ServerApiVersion } = require('mongodb');
@@ -9,15 +9,13 @@ const cors = require('cors');
 const app = express();
 const port = process.env.PORT || 8080;
 
-// --- Middleware ---
 app.use(cors({
-  origin: "https://xtrashare-bxc.vercel.app", // IMPORTANT: Specify your frontend domain for production
+  origin: "https://xtrashare-bxc.vercel.app", 
   methods: ["GET", "POST"],
   allowedHeaders: ["Content-Type"]
 }));
-app.use(express.json()); // Enable JSON body parsing for incoming requests
+app.use(express.json());
 
-// --- MongoDB Connection ---
 const uri = process.env.MONGODB_URI;
 const dbName = process.env.DB_NAME || 'ExtraShare';
 
@@ -26,7 +24,6 @@ let client;
 async function connectToMongo() {
   if (!uri) {
     console.error("CRITICAL ERROR: MONGODB_URI is not set. Please provide it as a Fly.io secret or in your local .env file.");
-    // Exit process if DB URI is not set, as DB connection is fundamental
     process.exit(1); 
   }
 
@@ -40,19 +37,15 @@ async function connectToMongo() {
     });
     await client.connect();
     console.log("Connected to MongoDB!");
-    // Ensure global state (event times) are initialized immediately after DB connection
     await ensureGlobalStateInitialized(); 
   } catch (err) {
     console.error("FAILED TO CONNECT TO MONGODB:", err);
-    // Exit process if DB connection fails, as this is a critical startup dependency
     process.exit(1); 
   }
 }
 
-// Helper to get DB instance, ensuring connection is established/reused
 function getDb() {
     if (!client || !client.db) {
-        // This indicates a severe issue where DB client is not initialized
         console.error("CRITICAL ERROR: MongoDB client not connected when getDb() was called.");
         throw new Error("MongoDB client not connected.");
     }
@@ -79,14 +72,11 @@ const EVENT_DURATION_HOURS = 95;
 const MAX_STAKE_SLOTS = 30000;
 const LUCKY_WINNER_SLOT_THRESHOLD = 9000;
 
-// Admin Wallet Address - Must be set as a secret on Fly.io
-// Example: flyctl secrets set ADMIN_WALLET_ADDRESS="0xYOURADMINWALLETADDRESSHERE"
 const ADMIN_WALLET_ADDRESS = process.env.ADMIN_WALLET_ADDRESS ? process.env.ADMIN_WALLET_ADDRESS.toLowerCase() : ''; 
 if (!ADMIN_WALLET_ADDRESS) {
     console.warn("WARNING: ADMIN_WALLET_ADDRESS environment variable is not set. Admin features will be inaccessible.");
 }
 
-// Helper function to check if the requesting wallet is an admin
 function isAdmin(walletAddress) {
     return walletAddress && walletAddress.toLowerCase() === ADMIN_WALLET_ADDRESS;
 }
@@ -110,6 +100,9 @@ async function ensureGlobalStateInitialized() {
                     totalSlotsUsed: 0, 
                     eventStartTime: newEventStartTime,
                     eventEndTime: newEventEndTime,
+                    isPaused: false, // NEW: Not paused by default
+                    pauseStartTime: null, // NEW: No pause time initially
+                    withdrawalsPaused: false, // NEW: Withdrawals not paused by default
                     lastResetTime: now
                 }},
                 { upsert: true }
@@ -118,21 +111,26 @@ async function ensureGlobalStateInitialized() {
         }
     } catch (error) {
         console.error("ERROR IN ensureGlobalStateInitialized:", error);
-        // This error might not be critical enough to stop the server from listening,
-        // but it means global state isn't initialized which will affect other endpoints.
-        // The server will still try to start.
     }
 }
 
 
-// --- Helper Functions for Backend Logic ---
-
+// Helper Function: Calculates and updates BXC balance based on time elapsed
 async function calculateAndSaveBXC(user) {
     const db = getDb();
     const usersCollection = db.collection('users');
     const globalStateCollection = db.collection('globalState');
     const globalState = await globalStateCollection.findOne({});
     const now = new Date();
+
+    if (globalState && globalState.isPaused) {
+        await usersCollection.updateOne(
+            { walletAddress: user.walletAddress },
+            { $set: { lastBXCAccrualTime: now } }
+        );
+        user.lastBXCAccrualTime = now;
+        return user;
+    }
 
     if (!user.lastBXCAccrualTime || user.slotsStaked === 0) { 
         await usersCollection.updateOne(
@@ -196,7 +194,7 @@ app.get('/api/health', (req, res) => {
 
 app.post('/api/status', async (req, res) => {
     const { walletAddress } = req.body;
-    const now = new Date(); // Declare 'now' once for this function
+    const now = new Date();
 
     try {
         const db = getDb();
@@ -230,7 +228,7 @@ app.post('/api/status', async (req, res) => {
         }
 
         const globalState = await globalStateCollection.findOne({}); 
-        if (!globalState) { // Should ideally be initialized by ensureGlobalStateInitialized, but fallback
+        if (!globalState) {
             throw new Error("Global state not found after startup initialization attempt.");
         }
 
@@ -255,6 +253,9 @@ app.post('/api/status', async (req, res) => {
                 totalSlotsUsed: globalState.totalSlotsUsed,
                 eventStartTime: globalState.eventStartTime,
                 eventEndTime: globalState.eventEndTime,
+                isPaused: globalState.isPaused || false, // NEW: Return isPaused status
+                pauseStartTime: globalState.pauseStartTime || null, // NEW: Return pauseStartTime
+                withdrawalsPaused: globalState.withdrawalsPaused || false, // NEW: Return withdrawalsPaused status
                 serverTime: now,
                 MAX_STAKE_SLOTS: MAX_STAKE_SLOTS
             },
@@ -270,7 +271,7 @@ app.post('/api/status', async (req, res) => {
 
 app.post('/api/stake', async (req, res) => {
     const { walletAddress, referrerRef, transactionHash } = req.body;
-    const now = new Date(); // Declare 'now' once for this function
+    const now = new Date();
 
     if (!walletAddress || !transactionHash) {
         return res.status(400).json({ message: "Wallet address and transaction hash are required for staking." });
@@ -286,9 +287,13 @@ app.post('/api/stake', async (req, res) => {
         let user = await usersCollection.findOne({ walletAddress: userWalletAddress });
         let globalState = await globalStateCollection.findOne({});
 
-        if (!globalState) { // Should not happen if ensureGlobalStateInitialized ran
+        if (!globalState) {
             throw new Error("Global state not found during stake. Server startup issue.");
         }
+        if (globalState.isPaused) { // NEW: Cannot stake if event paused
+            return res.status(400).json({ message: "Staking is currently paused by admin." });
+        }
+
 
         // --- Event Cycle Reset Logic (if current event ended or slots filled) ---
         if (globalState.totalSlotsUsed >= MAX_STAKE_SLOTS || now > globalState.eventEndTime) {
@@ -302,6 +307,9 @@ app.post('/api/stake', async (req, res) => {
                     totalSlotsUsed: 0, 
                     eventStartTime: newEventStartTime,
                     eventEndTime: newEventEndTime,
+                    isPaused: false, // NEW: Reset paused state on new cycle
+                    pauseStartTime: null, // NEW: Reset pause time
+                    withdrawalsPaused: false, // NEW: Reset withdrawals paused state
                     lastResetTime: now
                 }}
             );
@@ -407,6 +415,9 @@ app.post('/api/stake', async (req, res) => {
                 totalSlotsUsed: updatedGlobalState.totalSlotsUsed,
                 eventStartTime: updatedGlobalState.eventStartTime,
                 eventEndTime: updatedGlobalState.eventEndTime,
+                isPaused: updatedGlobalState.isPaused || false,
+                pauseStartTime: updatedGlobalState.pauseStartTime || null,
+                withdrawalsPaused: updatedGlobalState.withdrawalsPaused || false, // NEW: Return withdrawalsPaused status
                 MAX_STAKE_SLOTS: MAX_STAKE_SLOTS
             }
         });
@@ -420,7 +431,7 @@ app.post('/api/stake', async (req, res) => {
 
 app.post('/api/withdraw-stake', async (req, res) => {
     const { walletAddress } = req.body;
-    const now = new Date(); // Declare 'now' once for this function
+    const now = new Date();
 
     if (!walletAddress) {
         return res.status(400).json({ message: "Wallet address is required." });
@@ -439,6 +450,12 @@ app.post('/api/withdraw-stake', async (req, res) => {
 
         if (!user || user.stakedUSDValue < INITIAL_STAKE_AMOUNT || user.slotsStaked === 0) {
             return res.status(400).json({ message: "You have no active stake to withdraw." });
+        }
+        if (globalState && globalState.isPaused) { 
+            return res.status(400).json({ message: "Stake withdrawal is paused by admin." });
+        }
+        if (globalState && globalState.withdrawalsPaused) { // NEW: Check global withdrawal pause
+            return res.status(400).json({ message: "All withdrawals are currently paused by admin." });
         }
 
         if (globalState && globalState.eventStartTime && now > globalState.eventStartTime) {
@@ -478,7 +495,7 @@ app.post('/api/withdraw-stake', async (req, res) => {
 
 app.post('/api/reveal-reward', async (req, res) => {
     const { walletAddress } = req.body;
-    const now = new Date(); // Declare 'now' once for this function
+    const now = new Date();
 
     if (!walletAddress) {
         return res.status(400).json({ message: "Wallet address is required." });
@@ -496,6 +513,9 @@ app.post('/api/reveal-reward', async (req, res) => {
 
         if (!user || user.slotsStaked === 0) {
             return res.status(400).json({ message: "You must stake first to reveal rewards." });
+        }
+        if (globalState && globalState.isPaused) {
+            return res.status(400).json({ message: "Reward reveal is paused by admin." });
         }
 
         if (!globalState || !globalState.eventEndTime || now < globalState.eventEndTime) {
@@ -574,7 +594,7 @@ app.post('/api/reveal-reward', async (req, res) => {
 
 app.post('/api/collect-reward', async (req, res) => {
     const { walletAddress } = req.body;
-    const now = new Date(); // Declare 'now' once for this function
+    const now = new Date();
 
     if (!walletAddress) {
         return res.status(400).json({ message: "Wallet address is required." });
@@ -592,6 +612,9 @@ app.post('/api/collect-reward', async (req, res) => {
 
         if (!user || user.slotsStaked === 0) {
             return res.status(400).json({ message: "You must stake first to collect rewards." });
+        }
+        if (globalState && globalState.isPaused) {
+            return res.status(400).json({ message: "Reward collection is paused by admin." });
         }
 
         if (!globalState || !globalState.eventEndTime || now < globalState.eventEndTime) {
@@ -644,7 +667,7 @@ app.post('/api/collect-reward', async (req, res) => {
 
 app.post('/api/withdraw', async (req, res) => {
     const { walletAddress, token, amount } = req.body;
-    const now = new Date(); // Declare 'now' once for this function
+    const now = new Date();
 
     if (!walletAddress || token !== 'BXC') {
         return res.status(400).json({ message: "Wallet address and token type (BXC) are required." });
@@ -655,12 +678,20 @@ app.post('/api/withdraw', async (req, res) => {
     try {
         const db = getDb();
         const usersCollection = db.collection('users');
+        const globalStateCollection = db.collection('globalState');
 
         let user = await usersCollection.findOne({ walletAddress: userWalletAddress });
         user = await calculateAndSaveBXC(user);
+        const globalState = await globalStateCollection.findOne({});
 
         if (!user || user.BXC_Balance <= 0) {
             return res.status(400).json({ message: "No BXC balance to withdraw." });
+        }
+        if (globalState && globalState.isPaused) { 
+            return res.status(400).json({ message: "BXC withdrawal is paused by admin." });
+        }
+        if (globalState && globalState.withdrawalsPaused) { // NEW: Check global withdrawal pause
+            return res.status(400).json({ message: "All withdrawals are currently paused by admin." });
         }
 
         const withdrawAmount = (amount && amount > 0 && amount <= user.BXC_Balance) ? amount : user.BXC_Balance;
@@ -689,7 +720,7 @@ app.post('/api/withdraw', async (req, res) => {
 
 app.post('/api/withdrawAIN', async (req, res) => {
     const { walletAddress, amount } = req.body;
-    const now = new Date(); // Declare 'now' once for this function
+    const now = new Date();
 
     if (!walletAddress) {
         return res.status(400).json({ message: "Wallet address is required." });
@@ -700,11 +731,19 @@ app.post('/api/withdrawAIN', async (req, res) => {
     try {
         const db = getDb();
         const usersCollection = db.collection('users');
+        const globalStateCollection = db.collection('globalState');
 
         const user = await usersCollection.findOne({ walletAddress: userWalletAddress });
+        const globalState = await globalStateCollection.findOne({});
 
         if (!user || user.AIN_Balance <= 0) {
             return res.status(400).json({ message: "No AIN balance to withdraw." });
+        }
+        if (globalState && globalState.isPaused) { 
+            return res.status(400).json({ message: "AIN withdrawal is paused by admin." });
+        }
+        if (globalState && globalState.withdrawalsPaused) { // NEW: Check global withdrawal pause
+            return res.status(400).json({ message: "All withdrawals are currently paused by admin." });
         }
 
         const withdrawAmount = (amount && amount > 0 && amount <= user.AIN_Balance) ? amount : user.AIN_Balance;
@@ -733,7 +772,7 @@ app.post('/api/withdrawAIN', async (req, res) => {
 
 app.post('/api/referral-copied', async (req, res) => {
     const { walletAddress } = req.body;
-    const now = new Date(); // Declare 'now' once for this function
+    const now = new Date();
 
     if (!walletAddress) {
         return res.status(400).json({ message: "Wallet address is required." });
@@ -755,6 +794,9 @@ app.post('/api/referral-copied', async (req, res) => {
         }
         if (!globalState || !globalState.eventStartTime) {
             return res.status(400).json({ message: "Event has not started yet to earn copy bonuses." });
+        }
+        if (globalState && globalState.isPaused) {
+            return res.status(400).json({ message: "Referral bonus earning is paused by admin." });
         }
 
         if (user.lastReferralCopyBonusGiven && user.lastReferralCopyBonusGiven >= globalState.eventStartTime) {
@@ -785,8 +827,7 @@ app.post('/api/referral-copied', async (req, res) => {
     }
 });
 
-// --- NEW ADMIN API ROUTES ---
-// POST /api/admin/status - Check if connected user is an admin
+// --- ADMIN API ROUTES ---
 app.post('/api/admin/status', async (req, res) => {
     const { walletAddress } = req.body;
 
@@ -801,6 +842,202 @@ app.post('/api/admin/status', async (req, res) => {
     }
 });
 
+app.post('/api/admin/toggle-event-pause', async (req, res) => {
+    const { walletAddress } = req.body;
+    const now = new Date();
+
+    if (!isAdmin(walletAddress)) {
+        return res.status(403).json({ message: "Access Denied: Only admins can perform this action." });
+    }
+
+    try {
+        const db = getDb();
+        const globalStateCollection = db.collection('globalState');
+        let globalState = await globalStateCollection.findOne({});
+
+        if (!globalState) {
+            return res.status(404).json({ message: "Global state not found. Event not initialized." });
+        }
+
+        let newIsPaused = !globalState.isPaused; // Toggle the state
+        let newPauseStartTime = null;
+        let newEventEndTime = globalState.eventEndTime;
+        let message = `Event ${newIsPaused ? 'paused' : 'resumed'} successfully.`;
+
+        if (newIsPaused) { // If pausing
+            newPauseStartTime = now;
+            console.log(`Admin paused event at: ${newPauseStartTime}`);
+        } else { // If resuming
+            if (globalState.pauseStartTime) {
+                const pauseDurationMs = now.getTime() - globalState.pauseStartTime.getTime();
+                newEventEndTime = new Date(globalState.eventEndTime.getTime() + pauseDurationMs);
+                console.log(`Admin resumed event. Paused for ${pauseDurationMs / 1000} seconds. New event end time: ${newEventEndTime}`);
+            } else {
+                console.warn("Resuming event but no pauseStartTime recorded. Event time not adjusted.");
+                message += " (Warning: No previous pause time to adjust end time.)";
+            }
+            newPauseStartTime = null; // Clear pause start time on resume
+        }
+
+        await globalStateCollection.updateOne(
+            {},
+            { $set: {
+                isPaused: newIsPaused,
+                pauseStartTime: newPauseStartTime,
+                eventEndTime: newEventEndTime
+            }}
+        );
+
+        res.status(200).json({
+            message: message,
+            isPaused: newIsPaused,
+            eventEndTime: newEventEndTime 
+        });
+
+    } catch (error) {
+        console.error("Error toggling event pause:", error);
+        res.status(500).json({ message: "Internal server error toggling pause state." });
+    }
+});
+
+// NEW ADMIN ENDPOINT: POST /api/admin/set-event-time
+app.post('/api/admin/set-event-time', async (req, res) => {
+    const { walletAddress, durationHours } = req.body;
+    const now = new Date();
+
+    if (!isAdmin(walletAddress)) {
+        return res.status(403).json({ message: "Access Denied: Only admins can perform this action." });
+    }
+    if (typeof durationHours !== 'number' || durationHours <= 0) {
+        return res.status(400).json({ message: "Invalid durationHours. Must be a positive number." });
+    }
+
+    try {
+        const db = getDb();
+        const globalStateCollection = db.collection('globalState');
+
+        const newEventStartTime = now;
+        const newEventEndTime = new Date(now.getTime() + durationHours * 60 * 60 * 1000);
+
+        await globalStateCollection.updateOne(
+            {},
+            { $set: {
+                totalSlotsUsed: 0, // Reset slots for new event cycle
+                eventStartTime: newEventStartTime,
+                eventEndTime: newEventEndTime,
+                isPaused: false, // Ensure not paused on new set
+                pauseStartTime: null,
+                lastResetTime: now,
+                // withdrawalsPaused: false // Consider if this should also be reset
+            }},
+            { upsert: true }
+        );
+
+        // Optionally, reset user reward fields for the new event cycle for all users
+        const usersCollection = db.collection('users');
+        await usersCollection.updateMany(
+            {}, 
+            { $set: { 
+                claimedEventRewardTime: null, 
+                collectedEventRewardTime: null, 
+                lastRevealedUSDAmount: 0,
+                // lastReferralCopyBonusGiven: null 
+            } }
+        );
+
+        res.status(200).json({
+            message: `New event cycle set for ${durationHours} hours. Ends at: ${newEventEndTime}.`,
+            eventStartTime: newEventStartTime,
+            eventEndTime: newEventEndTime
+        });
+
+    } catch (error) {
+        console.error("Error setting event time:", error);
+        res.status(500).json({ message: "Internal server error setting event time." });
+    }
+});
+
+// NEW ADMIN ENDPOINT: POST /api/admin/toggle-withdrawals-pause
+app.post('/api/admin/toggle-withdrawals-pause', async (req, res) => {
+    const { walletAddress } = req.body;
+
+    if (!isAdmin(walletAddress)) {
+        return res.status(403).json({ message: "Access Denied: Only admins can perform this action." });
+    }
+
+    try {
+        const db = getDb();
+        const globalStateCollection = db.collection('globalState');
+        let globalState = await globalStateCollection.findOne({});
+
+        if (!globalState) {
+            return res.status(404).json({ message: "Global state not found. Event not initialized." });
+        }
+
+        let newWithdrawalsPaused = !globalState.withdrawalsPaused; // Toggle the state
+        
+        await globalStateCollection.updateOne(
+            {},
+            { $set: {
+                withdrawalsPaused: newWithdrawalsPaused
+            }}
+        );
+
+        res.status(200).json({
+            message: `All withdrawals are now ${newWithdrawalsPaused ? 'paused' : 'resumed'} by admin.`,
+            withdrawalsPaused: newWithdrawalsPaused
+        });
+
+    } catch (error) {
+        console.error("Error toggling withdrawals pause:", error);
+        res.status(500).json({ message: "Internal server error toggling withdrawal pause state." });
+    }
+});
+
+// NEW ADMIN ENDPOINT: POST /api/admin/users-leaderboard
+app.post('/api/admin/users-leaderboard', async (req, res) => {
+    const { walletAddress, sortBy = 'referralCount', limit = 100 } = req.body;
+
+    if (!isAdmin(walletAddress)) {
+        return res.status(403).json({ message: "Access Denied: Only admins can view user data." });
+    }
+
+    try {
+        const db = getDb();
+        const usersCollection = db.collection('users');
+
+        // Define sort order (descending for referralCount, BXC, AIN)
+        const sortCriteria = {};
+        if (sortBy === 'referralCount' || sortBy === 'BXC_Balance' || sortBy === 'AIN_Balance' || sortBy === 'stakedUSDValue') {
+            sortCriteria[sortBy] = -1; // -1 for descending
+        } else {
+            sortCriteria.referralCount = -1; // Default sort
+        }
+
+        const users = await usersCollection.find({})
+                                        .project({ 
+                                            walletAddress: 1, 
+                                            referralCode: 1,
+                                            referralCount: 1, 
+                                            BXC_Balance: 1, 
+                                            AIN_Balance: 1, 
+                                            stakedUSDValue: 1 
+                                        })
+                                        .sort(sortCriteria)
+                                        .limit(parseInt(limit))
+                                        .toArray();
+
+        res.status(200).json({
+            message: "User leaderboard fetched successfully.",
+            users: users
+        });
+
+    } catch (error) {
+        console.error("Error fetching users leaderboard:", error);
+        res.status(500).json({ message: "Internal server error fetching user data." });
+    }
+});
+
 
 // --- Server Listener for Fly.io ---
 connectToMongo().then(() => {
@@ -808,20 +1045,15 @@ connectToMongo().then(() => {
         console.log(`Backend server running on port ${port}`);
     });
 }).catch(err => {
-    // This catch is for errors *before* app.listen or critical DB connection failures
     console.error("FATAL: Failed to start server due to MongoDB connection or initialization error:", err);
-    process.exit(1); // Exit process on critical startup failure
+    process.exit(1);
 });
 
 // --- Robust Error Handling for Uncaught Exceptions ---
 process.on('unhandledRejection', (reason, promise) => {
     console.error('UNHANDLED REJECTION:', reason);
-    // Optionally, perform graceful shutdown or send error alerts
-    // process.exit(1); // In a production app, you might want to exit after logging
 });
 
 process.on('uncaughtException', (err) => {
     console.error('UNCAUGHT EXCEPTION:', err);
-    // Optionally, perform graceful shutdown or send error alerts
-    // process.exit(1); // In a production app, you might want to exit after logging
 });
