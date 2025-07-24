@@ -101,47 +101,54 @@ async function ensureGlobalStateInitialized() {
                 maxStakeSlots: 30000, // Default max slots
                 maxAinRewardPool: 100000, // Default total AIN pool cap (e.g., 100,000 AIN)
                 totalAinRewarded: 0, // Initial total AIN rewarded for the current event cycle
+                eventDurationHours: 95, // Default event duration in hours (for persistence)
             };
             await globalStateCollection.insertOne(globalState);
-            console.log(`New default global event and settings initialized.`);
-        } else if (!globalState.eventStartTime || !globalState.eventEndTime || now > globalState.eventEndTime) {
-            // This block runs if an event expired or was not set
-            console.log("Global event state expired. Initializing a new event cycle.");
-            // Use existing duration if available, otherwise default to 95 hours
-            const eventDurationHours = globalState.eventDurationHours || 95; // Use this to preserve admin set duration
-            const newEventStartTime = now;
-            const newEventEndTime = new Date(now.getTime() + eventDurationHours * 60 * 60 * 1000); 
-            
-            await globalStateCollection.updateOne(
-                {},
-                { $set: {
-                    totalSlotsUsed: 0, 
-                    eventStartTime: newEventStartTime,
-                    eventEndTime: newEventEndTime,
-                    isPaused: false, 
-                    pauseStartTime: null, 
-                    // withdrawalsPaused: false, // Don't reset this on event cycle start unless admin wants it reset
-                    lastResetTime: now,
-                    totalAinRewarded: 0, // Reset rewarded AIN for new event cycle
-                }},
-                // Upsert ensures the document exists, but if it does, it updates it
-                { upsert: true } 
-            );
-            console.log(`New default global event started at: ${newEventStartTime}, ends at: ${newEventEndTime}`);
-
-            // Also reset user reward flags for the new cycle
-            const usersCollection = db.collection('users');
-            await usersCollection.updateMany(
-                {}, 
-                { $set: { 
-                    claimedEventRewardTime: null, 
-                    collectedEventRewardTime: null, 
-                    lastRevealedUSDAmount: 0,
-                    // lastReferralCopyBonusGiven: null // Uncomment if you want this bonus per event cycle, not just once
-                } }
-            );
+            console.log(`[INIT] New default global event and settings initialized. Event ends: ${globalState.eventEndTime.toISOString()}`);
         } else {
-            // If global state exists and is active, ensure all new fields are present
+            console.log(`[INIT] Existing global state found. Current event ends: ${globalState.eventEndTime ? globalState.eventEndTime.toISOString() : 'N/A'}`);
+            console.log(`[INIT] isPaused: ${globalState.isPaused}, withdrawalsPaused: ${globalState.withdrawalsPaused}`);
+            console.log(`[INIT] Staking Address: ${globalState.stakingRecipientAddress}, Stake Amount: ${globalState.initialStakeAmountUSD}, Max Slots: ${globalState.maxStakeSlots}`);
+            console.log(`[INIT] AIN Pool: ${globalState.maxAinRewardPool}, AIN Rewarded: ${globalState.totalAinRewarded}`);
+
+            // If event expired, start a new one
+            if (!globalState.eventStartTime || !globalState.eventEndTime || now > globalState.eventEndTime) {
+                console.log("[INIT] Existing event expired. Starting a new event cycle.");
+                // Use existing duration if available, otherwise default to 95 hours
+                const eventDurationHours = globalState.eventDurationHours || 95; // Use this to preserve admin set duration
+                const newEventStartTime = now;
+                const newEventEndTime = new Date(now.getTime() + eventDurationHours * 60 * 60 * 1000); 
+                
+                await globalStateCollection.updateOne(
+                    {},
+                    { $set: {
+                        totalSlotsUsed: 0, 
+                        eventStartTime: newEventStartTime,
+                        eventEndTime: newEventEndTime,
+                        isPaused: false, 
+                        pauseStartTime: null, 
+                        // withdrawalsPaused: false, // Don't reset this on event cycle start unless admin wants it reset
+                        lastResetTime: now,
+                        totalAinRewarded: 0, // Reset rewarded AIN for new event cycle
+                    }},
+                    { upsert: true } 
+                );
+                console.log(`[INIT] New event cycle started at: ${newEventStartTime.toISOString()}, ends at: ${newEventEndTime.toISOString()}`);
+    
+                // Also reset user reward flags for the new cycle
+                const usersCollection = db.collection('users');
+                await usersCollection.updateMany(
+                    {}, 
+                    { $set: { 
+                        claimedEventRewardTime: null, 
+                        collectedEventRewardTime: null, 
+                        lastRevealedUSDAmount: 0,
+                        // lastReferralCopyBonusGiven: null // Uncomment if you want this bonus per event cycle, not just once
+                    } }
+                );
+            }
+
+            // Ensure any missing new fields are added to existing globalState document without overwriting existing
             const updateFields = {};
             if (globalState.stakingRecipientAddress === undefined) updateFields.stakingRecipientAddress = '0xYourDefaultStakeRecipientAddressHere';
             if (globalState.initialStakeAmountUSD === undefined) updateFields.initialStakeAmountUSD = 8;
@@ -151,7 +158,6 @@ async function ensureGlobalStateInitialized() {
             if (globalState.isPaused === undefined) updateFields.isPaused = false;
             if (globalState.pauseStartTime === undefined) updateFields.pauseStartTime = null;
             if (globalState.withdrawalsPaused === undefined) updateFields.withdrawalsPaused = false;
-            // Ensure eventDurationHours is present if not already
             if (globalState.eventDurationHours === undefined) updateFields.eventDurationHours = 95;
 
             if (Object.keys(updateFields).length > 0) {
@@ -279,12 +285,10 @@ app.post('/api/status', async (req, res) => {
 
         const globalState = await globalStateCollection.findOne({}); 
         if (!globalState) {
-            // This should ideally not happen if ensureGlobalStateInitialized runs on startup
-            // but as a fallback, ensure a default is returned to avoid crashing frontend
-            console.error("Global state not found during /api/status. Returning default.");
+            console.error("[API/STATUS] Global state not found. This should be initialized on startup.");
             return res.status(500).json({ 
-                message: "Global state not initialized on server.",
-                global: {
+                message: "Global state not initialized on server. Please check backend logs.",
+                global: { // Provide fallback structure to prevent frontend crashes
                     totalSlotsUsed: 0,
                     eventStartTime: now,
                     eventEndTime: new Date(now.getTime() + 95 * 60 * 60 * 1000),
@@ -298,11 +302,11 @@ app.post('/api/status', async (req, res) => {
                     maxAinRewardPool: 0,          
                     totalAinRewarded: 0,          
                     totalConnectedWallets: 0,
+                    eventDurationHours: 95,
                 }
             });
         }
 
-        // Feature 1: Total Connected Wallets - count all users
         const totalConnectedWallets = await usersCollection.countDocuments({});
 
         res.json({
@@ -331,18 +335,19 @@ app.post('/api/status', async (req, res) => {
                 withdrawalsPaused: globalState.withdrawalsPaused || false,
                 serverTime: now,
                 // NEW: Dynamic values from globalState
-                stakingRecipientAddress: globalState.stakingRecipientAddress, // Feature 2
-                initialStakeAmountUSD: globalState.initialStakeAmountUSD,     // Feature 5
-                maxStakeSlots: globalState.maxStakeSlots,                     // Feature 6
-                maxAinRewardPool: globalState.maxAinRewardPool || 0,          // Feature 3
-                totalAinRewarded: globalState.totalAinRewarded || 0,          // Feature 3
-                totalConnectedWallets: totalConnectedWallets,                 // Feature 1
+                stakingRecipientAddress: globalState.stakingRecipientAddress, 
+                initialStakeAmountUSD: globalState.initialStakeAmountUSD,     
+                maxStakeSlots: globalState.maxStakeSlots,                     
+                maxAinRewardPool: globalState.maxAinRewardPool || 0,          
+                totalAinRewarded: globalState.totalAinRewarded || 0,          
+                totalConnectedWallets: totalConnectedWallets,                 
+                eventDurationHours: globalState.eventDurationHours || 95,
             },
             message: "Status fetched successfully."
         });
 
     } catch (error) {
-        console.error("Error fetching status:", error);
+        console.error("[API/STATUS] Error fetching status:", error);
         res.status(500).json({ message: "Internal server error." });
     }
 });
@@ -373,14 +378,12 @@ app.post('/api/stake', async (req, res) => {
             return res.status(400).json({ message: "Staking is currently paused by admin." });
         }
 
-        // Dynamic MAX_STAKE_SLOTS
         const currentMaxStakeSlots = globalState.maxStakeSlots || 30000;
         const eventDurationHours = globalState.eventDurationHours || 95;
 
 
-        // --- Event Cycle Reset Logic (if current event ended or slots filled) ---
         if (globalState.totalSlotsUsed >= currentMaxStakeSlots || now > globalState.eventEndTime) { 
-            console.log("Current event cycle has ended or filled. Starting a new event cycle upon this stake.");
+            console.log("[API/STAKE] Current event cycle has ended or filled. Starting a new event cycle upon this stake.");
             const newEventStartTime = now;
             const newEventEndTime = new Date(now.getTime() + eventDurationHours * 60 * 60 * 1000); 
             
@@ -394,10 +397,10 @@ app.post('/api/stake', async (req, res) => {
                     pauseStartTime: null, 
                     withdrawalsPaused: false, 
                     lastResetTime: now,
-                    totalAinRewarded: 0, // Reset AIN rewarded for new event cycle
+                    totalAinRewarded: 0, 
                 }}
             );
-            globalState = await globalStateCollection.findOne({}); // Refetch updated globalState
+            globalState = await globalStateCollection.findOne({}); 
             
             await usersCollection.updateMany(
                 {}, 
@@ -407,10 +410,9 @@ app.post('/api/stake', async (req, res) => {
                     lastRevealedUSDAmount: 0,
                 } }
             );
-            console.log(`New event cycle started due to stake. Ends at: ${globalState.eventEndTime}`);
+            console.log(`[API/STAKE] New event cycle started due to stake. Ends at: ${globalState.eventEndTime.toISOString()}`);
         }
 
-        // Check if current slots used has reached max AFTER potential reset
         if (globalState.totalSlotsUsed >= currentMaxStakeSlots) { 
             return res.status(400).json({ message: "All staking slots are currently filled for this event cycle." });
         }
@@ -449,14 +451,8 @@ app.post('/api/stake', async (req, res) => {
              user = await calculateAndSaveBXC(user); 
         }
 
-        // Use dynamic INITIAL_STAKE_AMOUNT
         const currentInitialStakeAmount = globalState.initialStakeAmountUSD || 8;
-        // Use dynamic staking recipient address
-        const currentStakingRecipientAddress = globalState.stakingRecipientAddress;
-
-        // Note: The `amountUSD` in the transaction body is currently client-side.
-        // It's safer to use the `currentInitialStakeAmount` from the backend globalState here.
-        // For actual blockchain transactions, you'd calculate the BNB amount based on this USD value.
+        const currentStakingRecipientAddress = globalState.stakingRecipientAddress; // This is the address to use for the actual crypto transfer
 
         await usersCollection.updateOne(
             { walletAddress: userWalletAddress },
@@ -526,7 +522,7 @@ app.post('/api/stake', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Error during stake:", error);
+        console.error("[API/STAKE] Error during stake:", error);
         res.status(500).json({ message: "Internal server error during stake processing." });
     }
 });
@@ -590,7 +586,7 @@ app.post('/api/withdraw-stake', async (req, res) => {
         res.status(200).json({ message: `Your $${(globalState.initialStakeAmountUSD || 8).toFixed(2)} stake has been successfully withdrawn (simulated).` }); 
 
     } catch (error) {
-        console.error("Error during stake withdrawal:", error);
+        console.error("[API/WITHDRAW-STAKE] Error during stake withdrawal:", error);
         res.status(500).json({ message: "Internal server error during stake withdrawal." });
     }
 });
@@ -674,7 +670,7 @@ app.post('/api/reveal-reward', async (req, res) => {
             if (calculatedAinAmount === 0) { 
                 isLuckyWinner = false; 
             }
-            console.warn(`AIN reward adjusted due to pool cap. New AIN: ${calculatedAinAmount.toFixed(4)}`);
+            console.warn(`[API/REVEAL-REWARD] AIN reward adjusted due to pool cap. New AIN: ${calculatedAinAmount.toFixed(4)}`);
         }
         
         // Update total Ain rewarded in global state
@@ -711,7 +707,7 @@ app.post('/api/reveal-reward', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Error revealing reward:", error);
+        console.error("[API/REVEAL-REWARD] Error revealing reward:", error);
         res.status(500).json({ message: "Internal server error." });
     }
 });
@@ -784,7 +780,7 @@ app.post('/api/collect-reward', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Error collecting reward:", error);
+        console.error("[API/COLLECT-REWARD] Error collecting reward:", error);
         res.status(500).json({ message: "Internal server error." });
     }
 });
@@ -837,7 +833,7 @@ app.post('/api/withdraw', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Error during BXC withdrawal:", error);
+        console.error("[API/WITHDRAW] Error during BXC withdrawal:", error);
         res.status(500).json({ message: "Internal server error." });
     }
 });
@@ -889,7 +885,7 @@ app.post('/api/withdrawAIN', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Error during AIN withdrawal:", error);
+        console.error("[API/WITHDRAW AIN] Error during AIN withdrawal:", error);
         res.status(500).json({ message: "Internal server error." });
     }
 });
@@ -947,7 +943,7 @@ app.post('/api/referral-copied', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Error awarding referral copy bonus:", error);
+        console.error("[API/REFERRAL-COPIED] Error awarding referral copy bonus:", error);
         res.status(500).json({ message: "Internal server error." });
     }
 });
@@ -991,14 +987,14 @@ app.post('/api/admin/toggle-event-pause', async (req, res) => {
 
         if (newIsPaused) { 
             newPauseStartTime = now;
-            console.log(`Admin paused event at: ${newPauseStartTime}`);
+            console.log(`[ADMIN/TOGGLE-PAUSE] Admin paused event at: ${newPauseStartTime.toISOString()}`);
         } else { 
             if (globalState.pauseStartTime) {
                 const pauseDurationMs = now.getTime() - globalState.pauseStartTime.getTime();
                 newEventEndTime = new Date(globalState.eventEndTime.getTime() + pauseDurationMs);
-                console.log(`Admin resumed event. Paused for ${pauseDurationMs / 1000} seconds. New event end time: ${newEventEndTime}`);
+                console.log(`[ADMIN/TOGGLE-PAUSE] Admin resumed event. Paused for ${pauseDurationMs / 1000} seconds. New event end time: ${newEventEndTime.toISOString()}`);
             } else {
-                console.warn("Resuming event but no pauseStartTime recorded. Event time not adjusted.");
+                console.warn("[ADMIN/TOGGLE-PAUSE] Resuming event but no pauseStartTime recorded. Event time not adjusted.");
                 message += " (Warning: No previous pause time to adjust end time.)";
             }
             newPauseStartTime = null; 
@@ -1020,7 +1016,7 @@ app.post('/api/admin/toggle-event-pause', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Error toggling event pause:", error);
+        console.error("[ADMIN/TOGGLE-PAUSE] Error toggling event pause:", error);
         res.status(500).json({ message: "Internal server error toggling pause state." });
     }
 });
@@ -1047,19 +1043,18 @@ app.post('/api/admin/set-event-duration', async (req, res) => {
         await globalStateCollection.updateOne(
             {},
             { $set: {
-                totalSlotsUsed: 0, // Reset slots for new event cycle
+                totalSlotsUsed: 0, 
                 eventStartTime: newEventStartTime,
                 eventEndTime: newEventEndTime,
-                isPaused: false, // Ensure not paused on new set
+                isPaused: false, 
                 pauseStartTime: null,
                 lastResetTime: now,
                 eventDurationHours: durationHours, // Store the set duration
-                totalAinRewarded: 0, // Reset rewarded AIN for new event cycle
+                totalAinRewarded: 0, 
             }},
             { upsert: true }
         );
 
-        // Reset user reward flags for the new cycle
         const usersCollection = db.collection('users');
         await usersCollection.updateMany(
             {}, 
@@ -1070,6 +1065,7 @@ app.post('/api/admin/set-event-duration', async (req, res) => {
             } }
         );
 
+        console.log(`[ADMIN/SET-EVENT-DURATION] New event cycle set for ${durationHours} hours. Ends at: ${newEventEndTime.toISOString()}.`);
         res.status(200).json({
             message: `New event cycle set for ${durationHours} hours. Ends at: ${newEventEndTime}.`,
             eventStartTime: newEventStartTime,
@@ -1077,7 +1073,7 @@ app.post('/api/admin/set-event-duration', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Error setting event time:", error);
+        console.error("[ADMIN/SET-EVENT-DURATION] Error setting event time:", error);
         res.status(500).json({ message: "Internal server error setting event time." });
     }
 });
@@ -1107,14 +1103,14 @@ app.post('/api/admin/toggle-withdrawals-pause', async (req, res) => {
                 withdrawalsPaused: newWithdrawalsPaused
             }}
         );
-
+        console.log(`[ADMIN/TOGGLE-WITHDRAWALS] All withdrawals are now ${newWithdrawalsPaused ? 'paused' : 'resumed'}.`);
         res.status(200).json({
             message: `All withdrawals are now ${newWithdrawalsPaused ? 'paused' : 'resumed'} by admin.`,
             withdrawalsPaused: newWithdrawalsPaused
         });
 
     } catch (error) {
-        console.error("Error toggling withdrawals pause:", error);
+        console.error("[ADMIN/TOGGLE-WITHDRAWALS] Error toggling withdrawals pause:", error);
         res.status(500).json({ message: "Internal server error toggling withdrawal pause state." });
     }
 });
@@ -1131,16 +1127,15 @@ app.post('/api/admin/users-leaderboard', async (req, res) => {
         const db = getDb();
         const usersCollection = db.collection('users');
 
-        // Define sort order (descending for referralCount, BXC, AIN, stakedUSDValue)
         const sortCriteria = {};
         const validSortBys = ['referralCount', 'BXC_Balance', 'AIN_Balance', 'stakedUSDValue', 'createdAt']; 
         if (validSortBys.includes(sortBy)) {
             sortCriteria[sortBy] = -1; 
             if (sortBy === 'createdAt') { 
-                 sortCriteria[sortBy] = -1; // Newest first
+                 sortCriteria[sortBy] = -1; 
             }
         } else {
-            sortCriteria.referralCount = -1; // Default sort
+            sortCriteria.referralCount = -1; 
         }
 
         const users = await usersCollection.find({})
@@ -1163,7 +1158,7 @@ app.post('/api/admin/users-leaderboard', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Error fetching users leaderboard:", error);
+        console.error("[ADMIN/LEADERBOARD] Error fetching users leaderboard:", error);
         res.status(500).json({ message: "Internal server error fetching user data." });
     }
 });
@@ -1188,14 +1183,14 @@ app.post('/api/admin/set-staking-wallet', async (req, res) => {
             { $set: { stakingRecipientAddress: newStakingAddress.toLowerCase() } },
             { upsert: true }
         );
-
+        console.log(`[ADMIN/SET-STAKING-WALLET] Staking wallet address updated to: ${newStakingAddress.toLowerCase()}.`);
         res.status(200).json({
             message: `Staking wallet address updated to: ${newStakingAddress.toLowerCase()}.`,
             stakingRecipientAddress: newStakingAddress.toLowerCase()
         });
 
     } catch (error) {
-        console.error("Error setting staking wallet:", error);
+        console.error("[ADMIN/SET-STAKING-WALLET] Error setting staking wallet:", error);
         res.status(500).json({ message: "Internal server error setting staking wallet." });
     }
 });
@@ -1220,14 +1215,14 @@ app.post('/api/admin/set-stake-amount', async (req, res) => {
             { $set: { initialStakeAmountUSD: newStakeAmount } },
             { upsert: true }
         );
-
+        console.log(`[ADMIN/SET-STAKE-AMOUNT] Initial stake amount updated to $${newStakeAmount.toFixed(2)}.`);
         res.status(200).json({
             message: `Initial stake amount updated to $${newStakeAmount.toFixed(2)}.`,
             initialStakeAmountUSD: newStakeAmount
         });
 
     } catch (error) {
-        console.error("Error setting stake amount:", error);
+        console.error("[ADMIN/SET-STAKE-AMOUNT] Error setting stake amount:", error);
         res.status(500).json({ message: "Internal server error setting stake amount." });
     }
 });
@@ -1252,14 +1247,14 @@ app.post('/api/admin/set-max-slots', async (req, res) => {
             { $set: { maxStakeSlots: newMaxSlots } },
             { upsert: true }
         );
-
+        console.log(`[ADMIN/SET-MAX-SLOTS] Maximum stake slots updated to ${newMaxSlots}.`);
         res.status(200).json({
             message: `Maximum stake slots updated to ${newMaxSlots}.`,
             maxStakeSlots: newMaxSlots
         });
 
     } catch (error) {
-        console.error("Error setting max slots:", error);
+        console.error("[ADMIN/SET-MAX-SLOTS] Error setting max slots:", error);
         res.status(500).json({ message: "Internal server error setting max slots." });
     }
 });
@@ -1284,14 +1279,14 @@ app.post('/api/admin/set-ain-reward-pool', async (req, res) => {
             { $set: { maxAinRewardPool: newMaxAinRewardPool } },
             { upsert: true }
         );
-
+        console.log(`[ADMIN/SET-AIN-POOL] Max AIN reward pool set to ${newMaxAinRewardPool} AIN.`);
         res.status(200).json({
             message: `Max AIN reward pool set to ${newMaxAinRewardPool} AIN.`,
             maxAinRewardPool: newMaxAinRewardPool
         });
 
     } catch (error) {
-        console.error("Error setting AIN reward pool:", error);
+        console.error("[ADMIN/SET-AIN-POOL] Error setting AIN reward pool:", error);
         res.status(500).json({ message: "Internal server error setting AIN reward pool." });
     }
 });
@@ -1324,13 +1319,13 @@ app.post('/api/admin/fund-user', async (req, res) => {
         const result = await usersCollection.updateOne(
             { walletAddress: userToFundAddress },
             { $inc: { [updateField]: amount } },
-            { upsert: true } // Create user if they don't exist
+            { upsert: true } 
         );
 
         if (result.matchedCount === 0 && result.upsertedCount === 0) {
              return res.status(404).json({ message: `User ${userToFundAddress} not found and could not be created.` });
         }
-
+        console.log(`[ADMIN/FUND-USER] Successfully funded ${userToFundAddress} with ${amount.toFixed(4)} ${tokenType}.`);
         res.status(200).json({
             message: `Successfully funded ${userToFundAddress} with ${amount.toFixed(4)} ${tokenType}.`,
             targetWallet: userToFundAddress,
@@ -1339,7 +1334,7 @@ app.post('/api/admin/fund-user', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Error funding user:", error);
+        console.error("[ADMIN/FUND-USER] Error funding user:", error);
         res.status(500).json({ message: "Internal server error funding user." });
     }
 });
