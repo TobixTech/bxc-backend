@@ -1,23 +1,23 @@
-app = "bxc-backend" # IMPORTANT: Use the app name you chose during flyctl launch!
-primary_region = "ams" # Replace with your preferred region (e.g., ams, lhr, iad)
+# fly.toml app configuration file generated for bxc-backend-1dkpqw on 2025-07-24T18:50:46Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-# Remove the [build] section entirely if you are using a Dockerfile.
-# If you didn't have a Dockerfile, then the builder line would be useful.
-# But since you have a Dockerfile, Fly.io will use it by default.
+app = 'bxc-backend-1dkpqw'
+primary_region = 'jnb'
 
-[env]
-  # Any other environment variables your app needs can go here,
-  # but sensitive ones like MONGODB_URI should be set as secrets.
+[build]
 
 [http_service]
-  internal_port = 8080 # Make sure this matches the PORT your app listens on (process.env.PORT)
+  internal_port = 8080
   force_https = true
-  auto_stop_machines = true  # CORRECTED: Should be boolean true
-  auto_start_machines = true # CORRECTED: Should be boolean true
-  min_machines_running = 1 # Keep at least one machine running for responsiveness
-  processes = ["app"]
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
 
 [[vm]]
-  cpu_kind = "shared"
+  memory = '2048mb'
+  cpu_kind = 'shared'
   cpus = 1
-  memory = "2048mb"
+  memory_mb = 1024
