@@ -1113,7 +1113,7 @@ app.post('/api/admin/users-leaderboard', async (req, res) => {
             sortCriteria.referralCount = -1; // Default sort
         }
 
-        const users = await usersCollection.find({})\
+        const users = await usersCollection.find({}) /
                                         .project({ 
                                             walletAddress: 1, 
                                             referralCode: 1,
