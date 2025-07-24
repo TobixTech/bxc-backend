@@ -52,7 +52,7 @@ function getDb() {
     return client.db(dbName);
 }
 
-// --- General Constants (some moved to globalState) ---
+// --- General Constants (some values are now dynamically set in globalState) ---
 const BXC_ACCRUAL_PER_SECOND = 0.001;
 const REFERRAL_BXC = 1050;
 const REFERRAL_COPY_BXC_BONUS = 50;
@@ -66,6 +66,7 @@ const REWARD_USD_LARGE_MAX = 899;
 const REWARD_USD_REGULAR_MIN = 10;
 const REWARD_USD_REGULAR_MAX = 99;
 
+const LUCKY_WINNER_SLOT_THRESHOLD = 9000; // This can remain a constant if not admin-controlled
 
 const ADMIN_WALLET_ADDRESS = process.env.ADMIN_WALLET_ADDRESS ? process.env.ADMIN_WALLET_ADDRESS.toLowerCase() : ''; 
 if (!ADMIN_WALLET_ADDRESS) {
@@ -86,27 +87,30 @@ async function ensureGlobalStateInitialized() {
 
         if (!globalState) {
             console.log("Global state not found. Initializing with default values.");
-            // NEW DEFAULTS for staking address, amount, max slots, AIN pool
             globalState = {
                 totalSlotsUsed: 0, 
-                eventStartTime: now, // Start event now if no state
-                eventEndTime: new Date(now.getTime() + 95 * 60 * 60 * 1000), // Default 95 hours
+                eventStartTime: now, 
+                eventEndTime: new Date(now.getTime() + 95 * 60 * 60 * 1000), // Default 95 hours event duration
                 isPaused: false,
                 pauseStartTime: null,
                 withdrawalsPaused: false,
                 lastResetTime: now,
-                stakingRecipientAddress: '0x9FfDabC1b4e1d0a2B64045C32EBf3231F8541578', // SET A REAL DEFAULT HERE
-                initialStakeAmountUSD: 8, // Default initial stake
+                // --- NEW ADMIN-CONTROLLABLE DEFAULTS ---
+                stakingRecipientAddress: '0x9FfDabC1b4e1d0a2B64045C32EBf3231F8541578', // <<<--- IMPORTANT: REPLACE THIS PLACEHOLDER WITH YOUR ACTUAL STAKING WALLET ADDRESS
+                initialStakeAmountUSD: 8, // Default initial stake amount
                 maxStakeSlots: 30000, // Default max slots
                 maxAinRewardPool: 100000, // Default total AIN pool cap (e.g., 100,000 AIN)
-                totalAinRewarded: 0, // Initial total AIN rewarded
+                totalAinRewarded: 0, // Initial total AIN rewarded for the current event cycle
             };
-            await globalStateCollection.insertOne(globalState); // Use insertOne for first time
+            await globalStateCollection.insertOne(globalState);
             console.log(`New default global event and settings initialized.`);
         } else if (!globalState.eventStartTime || !globalState.eventEndTime || now > globalState.eventEndTime) {
+            // This block runs if an event expired or was not set
             console.log("Global event state expired. Initializing a new event cycle.");
+            // Use existing duration if available, otherwise default to 95 hours
+            const eventDurationHours = globalState.eventDurationHours || 95; // Use this to preserve admin set duration
             const newEventStartTime = now;
-            const newEventEndTime = new Date(now.getTime() + (globalState.EVENT_DURATION_HOURS || 95) * 60 * 60 * 1000); // Use existing duration or default
+            const newEventEndTime = new Date(now.getTime() + eventDurationHours * 60 * 60 * 1000); 
             
             await globalStateCollection.updateOne(
                 {},
@@ -116,16 +120,12 @@ async function ensureGlobalStateInitialized() {
                     eventEndTime: newEventEndTime,
                     isPaused: false, 
                     pauseStartTime: null, 
-                    // withdrawalsPaused: false, // Don't reset this on event cycle start unless desired
+                    // withdrawalsPaused: false, // Don't reset this on event cycle start unless admin wants it reset
                     lastResetTime: now,
-                    // Ensure new fields exist even if old globalState didn't have them
-                    stakingRecipientAddress: globalState.stakingRecipientAddress || '0xYourDefaultStakeRecipientAddressHere', 
-                    initialStakeAmountUSD: globalState.initialStakeAmountUSD || 8,
-                    maxStakeSlots: globalState.maxStakeSlots || 30000,
-                    maxAinRewardPool: globalState.maxAinRewardPool || 100000,
                     totalAinRewarded: 0, // Reset rewarded AIN for new event cycle
                 }},
-                { upsert: true } // Upsert is fine, it will insert if no match, update if matched
+                // Upsert ensures the document exists, but if it does, it updates it
+                { upsert: true } 
             );
             console.log(`New default global event started at: ${newEventStartTime}, ends at: ${newEventEndTime}`);
 
@@ -137,11 +137,11 @@ async function ensureGlobalStateInitialized() {
                     claimedEventRewardTime: null, 
                     collectedEventRewardTime: null, 
                     lastRevealedUSDAmount: 0,
-                    // lastReferralCopyBonusGiven: null // uncomment if this is per event
+                    // lastReferralCopyBonusGiven: null // Uncomment if you want this bonus per event cycle, not just once
                 } }
             );
         } else {
-            // Ensure any missing new fields are added to existing globalState document
+            // If global state exists and is active, ensure all new fields are present
             const updateFields = {};
             if (globalState.stakingRecipientAddress === undefined) updateFields.stakingRecipientAddress = '0xYourDefaultStakeRecipientAddressHere';
             if (globalState.initialStakeAmountUSD === undefined) updateFields.initialStakeAmountUSD = 8;
@@ -151,6 +151,8 @@ async function ensureGlobalStateInitialized() {
             if (globalState.isPaused === undefined) updateFields.isPaused = false;
             if (globalState.pauseStartTime === undefined) updateFields.pauseStartTime = null;
             if (globalState.withdrawalsPaused === undefined) updateFields.withdrawalsPaused = false;
+            // Ensure eventDurationHours is present if not already
+            if (globalState.eventDurationHours === undefined) updateFields.eventDurationHours = 95;
 
             if (Object.keys(updateFields).length > 0) {
                 await globalStateCollection.updateOne({}, { $set: updateFields });
@@ -277,7 +279,27 @@ app.post('/api/status', async (req, res) => {
 
         const globalState = await globalStateCollection.findOne({}); 
         if (!globalState) {
-            throw new Error("Global state not found after startup initialization attempt.");
+            // This should ideally not happen if ensureGlobalStateInitialized runs on startup
+            // but as a fallback, ensure a default is returned to avoid crashing frontend
+            console.error("Global state not found during /api/status. Returning default.");
+            return res.status(500).json({ 
+                message: "Global state not initialized on server.",
+                global: {
+                    totalSlotsUsed: 0,
+                    eventStartTime: now,
+                    eventEndTime: new Date(now.getTime() + 95 * 60 * 60 * 1000),
+                    isPaused: false,
+                    pauseStartTime: null,
+                    withdrawalsPaused: false,
+                    serverTime: now,
+                    stakingRecipientAddress: '0xDefaultErrorAddress', 
+                    initialStakeAmountUSD: 8,     
+                    maxStakeSlots: 30000,                     
+                    maxAinRewardPool: 0,          
+                    totalAinRewarded: 0,          
+                    totalConnectedWallets: 0,
+                }
+            });
         }
 
         // Feature 1: Total Connected Wallets - count all users
@@ -353,12 +375,14 @@ app.post('/api/stake', async (req, res) => {
 
         // Dynamic MAX_STAKE_SLOTS
         const currentMaxStakeSlots = globalState.maxStakeSlots || 30000;
+        const eventDurationHours = globalState.eventDurationHours || 95;
+
 
         // --- Event Cycle Reset Logic (if current event ended or slots filled) ---
-        if (globalState.totalSlotsUsed >= currentMaxStakeSlots || now > globalState.eventEndTime) { // Use dynamic max slots
+        if (globalState.totalSlotsUsed >= currentMaxStakeSlots || now > globalState.eventEndTime) { 
             console.log("Current event cycle has ended or filled. Starting a new event cycle upon this stake.");
             const newEventStartTime = now;
-            const newEventEndTime = new Date(now.getTime() + (globalState.EVENT_DURATION_HOURS || 95) * 60 * 60 * 1000); // Use existing duration or default
+            const newEventEndTime = new Date(now.getTime() + eventDurationHours * 60 * 60 * 1000); 
             
             await globalStateCollection.updateOne(
                 {},
@@ -387,7 +411,7 @@ app.post('/api/stake', async (req, res) => {
         }
 
         // Check if current slots used has reached max AFTER potential reset
-        if (globalState.totalSlotsUsed >= currentMaxStakeSlots) { // Re-check after potential reset
+        if (globalState.totalSlotsUsed >= currentMaxStakeSlots) { 
             return res.status(400).json({ message: "All staking slots are currently filled for this event cycle." });
         }
 
@@ -427,16 +451,22 @@ app.post('/api/stake', async (req, res) => {
 
         // Use dynamic INITIAL_STAKE_AMOUNT
         const currentInitialStakeAmount = globalState.initialStakeAmountUSD || 8;
+        // Use dynamic staking recipient address
+        const currentStakingRecipientAddress = globalState.stakingRecipientAddress;
+
+        // Note: The `amountUSD` in the transaction body is currently client-side.
+        // It's safer to use the `currentInitialStakeAmount` from the backend globalState here.
+        // For actual blockchain transactions, you'd calculate the BNB amount based on this USD value.
 
         await usersCollection.updateOne(
             { walletAddress: userWalletAddress },
             {
-                $inc: { slotsStaked: 1, BXC_Balance: INITIAL_BXC }, // BXC initial bonus is fixed
+                $inc: { slotsStaked: 1, BXC_Balance: INITIAL_BXC }, 
                 $set: { 
-                    stakedUSDValue: currentInitialStakeAmount, // Use dynamic stake amount
+                    stakedUSDValue: currentInitialStakeAmount, 
                     lastBXCAccrualTime: now,
                 }, 
-                $push: { stakeTransactions: { hash: transactionHash, timestamp: now, amountUSD: currentInitialStakeAmount } } // Log amount
+                $push: { stakeTransactions: { hash: transactionHash, timestamp: now, amountUSD: currentInitialStakeAmount } } 
             }
         );
 
@@ -487,8 +517,8 @@ app.post('/api/stake', async (req, res) => {
                 isPaused: updatedGlobalState.isPaused || false,
                 pauseStartTime: updatedGlobalState.pauseStartTime || null,
                 withdrawalsPaused: updatedGlobalState.withdrawalsPaused || false,
-                maxStakeSlots: updatedGlobalState.maxStakeSlots, // Return dynamic max slots
-                initialStakeAmountUSD: updatedGlobalState.initialStakeAmountUSD, // Return dynamic stake amount
+                maxStakeSlots: updatedGlobalState.maxStakeSlots, 
+                initialStakeAmountUSD: updatedGlobalState.initialStakeAmountUSD, 
                 stakingRecipientAddress: updatedGlobalState.stakingRecipientAddress,
                 maxAinRewardPool: updatedGlobalState.maxAinRewardPool,
                 totalAinRewarded: updatedGlobalState.totalAinRewarded,
@@ -521,7 +551,7 @@ app.post('/api/withdraw-stake', async (req, res) => {
         user = await calculateAndSaveBXC(user);
         const globalState = await globalStateCollection.findOne({});
 
-        if (!user || user.stakedUSDValue < (globalState.initialStakeAmountUSD || 8) || user.slotsStaked === 0) { // Use dynamic stake amount
+        if (!user || user.stakedUSDValue < (globalState.initialStakeAmountUSD || 8) || user.slotsStaked === 0) { 
             return res.status(400).json({ message: "You have no active stake to withdraw." });
         }
         if (globalState && globalState.isPaused) { 
@@ -557,7 +587,7 @@ app.post('/api/withdraw-stake', async (req, res) => {
             { $inc: { totalSlotsUsed: -1 } }
         );
 
-        res.status(200).json({ message: `Your $${(globalState.initialStakeAmountUSD || 8).toFixed(2)} stake has been successfully withdrawn (simulated).` }); // Use dynamic stake amount
+        res.status(200).json({ message: `Your $${(globalState.initialStakeAmountUSD || 8).toFixed(2)} stake has been successfully withdrawn (simulated).` }); 
 
     } catch (error) {
         console.error("Error during stake withdrawal:", error);
@@ -640,9 +670,9 @@ app.post('/api/reveal-reward', async (req, res) => {
         if (maxAinRewardPool > 0 && (totalAinRewarded + calculatedAinAmount) > maxAinRewardPool) {
             // Adjust reward to not exceed cap
             calculatedAinAmount = Math.max(0, maxAinRewardPool - totalAinRewarded);
-            rewardAmountUSD = calculatedAinAmount * AIN_USD_PRICE; // Adjust USD equivalent
-            if (calculatedAinAmount === 0) { // If no more AIN left in pool
-                isLuckyWinner = false; // No lucky winner if 0 AIN rewarded
+            rewardAmountUSD = calculatedAinAmount * AIN_USD_PRICE; 
+            if (calculatedAinAmount === 0) { 
+                isLuckyWinner = false; 
             }
             console.warn(`AIN reward adjusted due to pool cap. New AIN: ${calculatedAinAmount.toFixed(4)}`);
         }
@@ -660,7 +690,7 @@ app.post('/api/reveal-reward', async (req, res) => {
             {
                 $set: {
                     claimedEventRewardTime: now,
-                    lastRevealedUSDAmount: rewardAmountUSD, // Store USD amount for consistency
+                    lastRevealedUSDAmount: rewardAmountUSD, 
                 }
             }
         );
@@ -995,7 +1025,7 @@ app.post('/api/admin/toggle-event-pause', async (req, res) => {
     }
 });
 
-// ADMIN ENDPOINT: POST /api/admin/set-event-time (Renamed for clarity, now uses duration)
+// ADMIN ENDPOINT: POST /api/admin/set-event-duration
 app.post('/api/admin/set-event-duration', async (req, res) => {
     const { walletAddress, durationHours } = req.body;
     const now = new Date();
@@ -1023,7 +1053,7 @@ app.post('/api/admin/set-event-duration', async (req, res) => {
                 isPaused: false, // Ensure not paused on new set
                 pauseStartTime: null,
                 lastResetTime: now,
-                // Do NOT reset withdrawalsPaused here, it's a separate control
+                eventDurationHours: durationHours, // Store the set duration
                 totalAinRewarded: 0, // Reset rewarded AIN for new event cycle
             }},
             { upsert: true }
@@ -1103,17 +1133,17 @@ app.post('/api/admin/users-leaderboard', async (req, res) => {
 
         // Define sort order (descending for referralCount, BXC, AIN, stakedUSDValue)
         const sortCriteria = {};
-        const validSortBys = ['referralCount', 'BXC_Balance', 'AIN_Balance', 'stakedUSDValue', 'createdAt']; // Added createdAt
+        const validSortBys = ['referralCount', 'BXC_Balance', 'AIN_Balance', 'stakedUSDValue', 'createdAt']; 
         if (validSortBys.includes(sortBy)) {
-            sortCriteria[sortBy] = -1; // -1 for descending for most numerical, 1 for createdAt (oldest first, or -1 for newest)
-            if (sortBy === 'createdAt') { // Sort newest users first by default
-                 sortCriteria[sortBy] = -1;
+            sortCriteria[sortBy] = -1; 
+            if (sortBy === 'createdAt') { 
+                 sortCriteria[sortBy] = -1; // Newest first
             }
         } else {
             sortCriteria.referralCount = -1; // Default sort
         }
 
-        const users = await usersCollection.find({}) /
+        const users = await usersCollection.find({})
                                         .project({ 
                                             walletAddress: 1, 
                                             referralCode: 1,
@@ -1121,10 +1151,10 @@ app.post('/api/admin/users-leaderboard', async (req, res) => {
                                             BXC_Balance: 1, 
                                             AIN_Balance: 1, 
                                             stakedUSDValue: 1,
-                                            createdAt: 1 // Include createdAt for display/sorting
-                                        })\
-                                        .sort(sortCriteria)\
-                                        .limit(parseInt(limit))\
+                                            createdAt: 1 
+                                        })
+                                        .sort(sortCriteria)
+                                        .limit(parseInt(limit))
                                         .toArray();
 
         res.status(200).json({
@@ -1160,7 +1190,7 @@ app.post('/api/admin/set-staking-wallet', async (req, res) => {
         );
 
         res.status(200).json({
-            message: `Staking wallet address updated to: ${newStakingAddress}.`,
+            message: `Staking wallet address updated to: ${newStakingAddress.toLowerCase()}.`,
             stakingRecipientAddress: newStakingAddress.toLowerCase()
         });
 
