@@ -56,6 +56,7 @@ function getDb() {
 const BXC_ACCRUAL_PER_SECOND = 0.001;
 const REFERRAL_BXC = 1050;
 const REFERRAL_COPY_BXC_BONUS = 50;
+const INITIAL_BXC = 2000; // <--- ADDED THIS LINE
 
 const AIN_USD_PRICE = 0.137; // Still a fixed price for AIN conversion
 const REWARD_CHANCE_LARGE_WIN = 0.1; 
