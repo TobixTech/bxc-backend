@@ -56,7 +56,7 @@ function getDb() {
 const BXC_ACCRUAL_PER_SECOND = 0.001;
 const REFERRAL_BXC = 1050;
 const REFERRAL_COPY_BXC_BONUS = 50;
-const INITIAL_BXC = 2000; // <--- This line was added previously
+const INITIAL_BXC = 2000; 
 
 const AIN_USD_PRICE = 0.137; // Still a fixed price for AIN conversion
 const REWARD_CHANCE_LARGE_WIN = 0.1; 
@@ -290,7 +290,7 @@ app.post('/api/status', async (req, res) => {
 
         const globalState = await globalStateCollection.findOne({}); 
         if (!globalState) {
-            console.error("[API/STATUS] Global state not found. This should be initialized on startup.");
+            console.error("[API/STATUS] Global state not found. This should be initialized on server. Please check backend logs.");
             return res.status(500).json({ 
                 message: "Global state not initialized on server. Please check backend logs.",
                 global: { // Provide fallback structure to prevent frontend crashes
@@ -1303,8 +1303,8 @@ app.post('/api/admin/set-ain-reward-pool', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("[ADMIN/SET-AIN-POOL] Error setting AIN reward pool:", error);
-        res.status(500).json({ message: "Internal server error setting AIN reward pool." });
+        console.error("[ADMIN/SET-AIN-POOL] Error setting AIN pool:", error);
+        res.status(500).json({ message: "Internal server error setting AIN pool." });
     }
 });
 
@@ -1377,15 +1377,14 @@ app.post('/api/admin/reset-user-profile', async (req, res) => {
         const globalStateCollection = db.collection('globalState');
 
         const user = await usersCollection.findOne({ walletAddress: userToResetAddress });
+        let globalState = await globalStateCollection.findOne({}); // Fetch global state
 
         if (!user) {
             return res.status(404).json({ message: "User not found." });
         }
-
-        let totalSlotsChange = 0;
-        if (user.slotsStaked > 0) {
-            totalSlotsChange = -user.slotsStaked; // Decrement by the number of slots the user held
-        }
+        
+        // Determine how many slots to decrement from global count, but ensure it doesn't go below 0
+        const slotsToDecrement = user.slotsStaked > 0 ? user.slotsStaked : 0;
 
         // Reset user's staking-related data
         await usersCollection.updateOne(
@@ -1403,18 +1402,21 @@ app.post('/api/admin/reset-user-profile', async (req, res) => {
             }
         );
 
-        // Update global state if slots were decremented
-        if (totalSlotsChange < 0) {
+        // Safely update global totalSlotsUsed, ensuring it doesn't go below zero
+        if (slotsToDecrement > 0) {
+            let currentTotalSlotsUsed = globalState.totalSlotsUsed || 0;
+            let newTotalSlotsUsed = Math.max(0, currentTotalSlotsUsed - slotsToDecrement);
+
             await globalStateCollection.updateOne(
                 {},
-                { $inc: { totalSlotsUsed: totalSlotsChange } } // totalSlotsChange is negative, so it decreases
+                { $set: { totalSlotsUsed: newTotalSlotsUsed } }
             );
         }
 
         const updatedUser = await usersCollection.findOne({ walletAddress: userToResetAddress });
         const updatedGlobalState = await globalStateCollection.findOne({});
 
-        console.log(`[ADMIN/RESET-USER] User ${userToResetAddress} staking profile reset.`);
+        console.log(`[ADMIN/RESET-USER] User ${userToResetAddress} staking profile reset. Slots decremented: ${slotsToDecrement}`);
 
         res.status(200).json({
             message: `User ${userToResetAddress}'s staking profile has been successfully reset. They can now stake again.`,
@@ -1437,6 +1439,58 @@ app.post('/api/admin/reset-user-profile', async (req, res) => {
     } catch (error) {
         console.error("[ADMIN/RESET-USER] Error resetting user profile:", error);
         res.status(500).json({ message: "Internal server error resetting user profile." });
+    }
+});
+
+
+// NEW ADMIN ENDPOINT: POST /api/admin/reset-all-user-stakes
+app.post('/api/admin/reset-all-user-stakes', async (req, res) => {
+    const { walletAddress: adminWalletAddress } = req.body;
+    const now = new Date();
+
+    if (!isAdmin(adminWalletAddress)) {
+        return res.status(403).json({ message: "Access Denied: Only admins can perform this action." });
+    }
+
+    try {
+        const db = getDb();
+        const usersCollection = db.collection('users');
+        const globalStateCollection = db.collection('globalState');
+
+        // Reset staking-related data for ALL users
+        await usersCollection.updateMany(
+            {},
+            {
+                $set: {
+                    slotsStaked: 0,
+                    stakedUSDValue: 0,
+                    stakeTransactions: [], // Clear all past stake records
+                    claimedEventRewardTime: null,
+                    collectedEventRewardTime: null,
+                    lastRevealedUSDAmount: 0,
+                    lastBXCAccrualTime: now
+                }
+            }
+        );
+
+        // Reset totalSlotsUsed in global state to 0
+        await globalStateCollection.updateOne(
+            {},
+            { $set: { totalSlotsUsed: 0 } }
+        );
+
+        console.log(`[ADMIN/RESET-ALL-USERS] All users' staking profiles reset and totalSlotsUsed set to 0.`);
+
+        res.status(200).json({
+            message: "All users' staking profiles have been successfully reset. Total slots used reset to 0.",
+            global: {
+                totalSlotsUsed: 0
+            }
+        });
+
+    } catch (error) {
+        console.error("[ADMIN/RESET-ALL-USERS] Error resetting all user profiles:", error);
+        res.status(500).json({ message: "Internal server error resetting all user profiles." });
     }
 });
 
