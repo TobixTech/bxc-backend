@@ -56,7 +56,7 @@ function getDb() {
 const BXC_ACCRUAL_PER_SECOND = 0.001;
 const REFERRAL_BXC = 1050;
 const REFERRAL_COPY_BXC_BONUS = 50;
-const INITIAL_BXC = 2000; // <--- ADDED THIS LINE
+const INITIAL_BXC = 2000; // <--- This line was added previously
 
 const AIN_USD_PRICE = 0.137; // Still a fixed price for AIN conversion
 const REWARD_CHANCE_LARGE_WIN = 0.1; 
@@ -128,15 +128,14 @@ async function ensureGlobalStateInitialized() {
                         eventEndTime: newEventEndTime,
                         isPaused: false, 
                         pauseStartTime: null, 
-                        // withdrawalsPaused: false, // Don't reset this on event cycle start unless admin wants it reset
+                        withdrawalsPaused: false, 
                         lastResetTime: now,
-                        totalAinRewarded: 0, // Reset rewarded AIN for new event cycle
-                    }},
-                    { upsert: true } 
+                        totalAinRewarded: 0, 
+                    }}
                 );
-                console.log(`[INIT] New event cycle started at: ${newEventStartTime.toISOString()}, ends at: ${newEventEndTime.toISOString()}`);
-    
-                // Also reset user reward flags for the new cycle
+                globalState = await globalStateCollection.findOne({}); // Refresh globalState after update
+                
+                // ALSO RESET USER STAKING STATUS FOR THE NEW CYCLE (FIX FOR NEGATIVE SLOTS)
                 const usersCollection = db.collection('users');
                 await usersCollection.updateMany(
                     {}, 
@@ -144,9 +143,14 @@ async function ensureGlobalStateInitialized() {
                         claimedEventRewardTime: null, 
                         collectedEventRewardTime: null, 
                         lastRevealedUSDAmount: 0,
-                        // lastReferralCopyBonusGiven: null // Uncomment if you want this bonus per event cycle, not just once
+                        slotsStaked: 0, // ADDED: Reset slots staked for new event cycle
+                        stakedUSDValue: 0, // ADDED: Reset staked USD value for new event cycle
+                        stakeTransactions: [], // ADDED: Clear stake transactions for new event cycle
+                        lastBXCAccrualTime: now // ADDED: Reset accrual time
                     } }
                 );
+                console.log(`[INIT] New event cycle started at: ${newEventStartTime.toISOString()}, ends at: ${newEventEndTime.toISOString()}`);
+                console.log("[INIT] All users' staking statuses reset for the new event cycle.");
             }
 
             // Ensure any missing new fields are added to existing globalState document without overwriting existing
@@ -401,17 +405,23 @@ app.post('/api/stake', async (req, res) => {
                     totalAinRewarded: 0, 
                 }}
             );
-            globalState = await globalStateCollection.findOne({}); 
+            globalState = await globalStateCollection.findOne({}); // Refresh globalState after update
             
+            // ALSO RESET USER STAKING STATUS FOR THE NEW CYCLE (FIX FOR NEGATIVE SLOTS)
             await usersCollection.updateMany(
                 {}, 
                 { $set: { 
                     claimedEventRewardTime: null, 
                     collectedEventRewardTime: null, 
                     lastRevealedUSDAmount: 0,
+                    slotsStaked: 0, // ADDED: Reset slots staked for new event cycle
+                    stakedUSDValue: 0, // ADDED: Reset staked USD value for new event cycle
+                    stakeTransactions: [], // ADDED: Clear stake transactions for new event cycle
+                    lastBXCAccrualTime: now // ADDED: Reset accrual time
                 } }
             );
             console.log(`[API/STAKE] New event cycle started due to stake. Ends at: ${globalState.eventEndTime.toISOString()}`);
+            console.log("[API/STAKE] All users' staking statuses reset for the new event cycle.");
         }
 
         if (globalState.totalSlotsUsed >= currentMaxStakeSlots) { 
@@ -1056,6 +1066,7 @@ app.post('/api/admin/set-event-duration', async (req, res) => {
             { upsert: true }
         );
 
+        // RESET USER STAKING STATUS FOR THE NEW CYCLE (FIX FOR NEGATIVE SLOTS)
         const usersCollection = db.collection('users');
         await usersCollection.updateMany(
             {}, 
@@ -1063,10 +1074,15 @@ app.post('/api/admin/set-event-duration', async (req, res) => {
                 claimedEventRewardTime: null, 
                 collectedEventRewardTime: null, 
                 lastRevealedUSDAmount: 0,
+                slotsStaked: 0, // ADDED: Reset slots staked for new event cycle
+                stakedUSDValue: 0, // ADDED: Reset staked USD value for new event cycle
+                stakeTransactions: [], // ADDED: Clear stake transactions for new event cycle
+                lastBXCAccrualTime: now // ADDED: Reset accrual time
             } }
         );
 
         console.log(`[ADMIN/SET-EVENT-DURATION] New event cycle set for ${durationHours} hours. Ends at: ${newEventEndTime.toISOString()}.`);
+        console.log("[ADMIN/SET-EVENT-DURATION] All users' staking statuses reset for the new event cycle.");
         res.status(200).json({
             message: `New event cycle set for ${durationHours} hours. Ends at: ${newEventEndTime}.`,
             eventStartTime: newEventStartTime,
@@ -1340,6 +1356,7 @@ app.post('/api/admin/fund-user', async (req, res) => {
     }
 });
 
+
 // NEW ADMIN ENDPOINT: POST /api/admin/reset-user-profile
 app.post('/api/admin/reset-user-profile', async (req, res) => {
     const { adminWalletAddress, targetWalletAddress } = req.body;
@@ -1422,7 +1439,6 @@ app.post('/api/admin/reset-user-profile', async (req, res) => {
         res.status(500).json({ message: "Internal server error resetting user profile." });
     }
 });
-
 
 
 // --- Server Listener for Fly.io ---
