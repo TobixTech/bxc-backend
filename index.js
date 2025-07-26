@@ -1340,6 +1340,90 @@ app.post('/api/admin/fund-user', async (req, res) => {
     }
 });
 
+// NEW ADMIN ENDPOINT: POST /api/admin/reset-user-profile
+app.post('/api/admin/reset-user-profile', async (req, res) => {
+    const { adminWalletAddress, targetWalletAddress } = req.body;
+    const now = new Date();
+
+    if (!isAdmin(adminWalletAddress)) {
+        return res.status(403).json({ message: "Access Denied: Only admins can perform this action." });
+    }
+    if (!targetWalletAddress || !/^0x[a-fA-F0-9]{40}$/.test(targetWalletAddress)) {
+        return res.status(400).json({ message: "Invalid target wallet address format." });
+    }
+
+    const userToResetAddress = targetWalletAddress.toLowerCase();
+
+    try {
+        const db = getDb();
+        const usersCollection = db.collection('users');
+        const globalStateCollection = db.collection('globalState');
+
+        const user = await usersCollection.findOne({ walletAddress: userToResetAddress });
+
+        if (!user) {
+            return res.status(404).json({ message: "User not found." });
+        }
+
+        let totalSlotsChange = 0;
+        if (user.slotsStaked > 0) {
+            totalSlotsChange = -user.slotsStaked; // Decrement by the number of slots the user held
+        }
+
+        // Reset user's staking-related data
+        await usersCollection.updateOne(
+            { walletAddress: userToResetAddress },
+            {
+                $set: {
+                    slotsStaked: 0,
+                    stakedUSDValue: 0,
+                    stakeTransactions: [], // Clear all past stake records for this user
+                    claimedEventRewardTime: null,
+                    collectedEventRewardTime: null,
+                    lastRevealedUSDAmount: 0,
+                    lastBXCAccrualTime: now // Reset accrual time to prevent immediate back-accrual if they re-stake
+                }
+            }
+        );
+
+        // Update global state if slots were decremented
+        if (totalSlotsChange < 0) {
+            await globalStateCollection.updateOne(
+                {},
+                { $inc: { totalSlotsUsed: totalSlotsChange } } // totalSlotsChange is negative, so it decreases
+            );
+        }
+
+        const updatedUser = await usersCollection.findOne({ walletAddress: userToResetAddress });
+        const updatedGlobalState = await globalStateCollection.findOne({});
+
+        console.log(`[ADMIN/RESET-USER] User ${userToResetAddress} staking profile reset.`);
+
+        res.status(200).json({
+            message: `User ${userToResetAddress}'s staking profile has been successfully reset. They can now stake again.`,
+            user: {
+                walletAddress: updatedUser.walletAddress,
+                slotsStaked: updatedUser.slotsStaked,
+                stakedUSDValue: updatedUser.stakedUSDValue,
+                BXC_Balance: updatedUser.BXC_Balance, // BXC/AIN balances are NOT reset by this function
+                AIN_Balance: updatedUser.AIN_Balance,
+                claimedEventRewardTime: updatedUser.claimedEventRewardTime,
+                collectedEventRewardTime: updatedUser.collectedEventRewardTime,
+                lastRevealedUSDAmount: updatedUser.lastRevealedUSDAmount,
+                stakeTransactions: updatedUser.stakeTransactions
+            },
+            global: {
+                totalSlotsUsed: updatedGlobalState.totalSlotsUsed
+            }
+        });
+
+    } catch (error) {
+        console.error("[ADMIN/RESET-USER] Error resetting user profile:", error);
+        res.status(500).json({ message: "Internal server error resetting user profile." });
+    }
+});
+
+
 
 // --- Server Listener for Fly.io ---
 connectToMongo().then(() => {
